@@ -53,3 +53,14 @@ _c.js
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# ---- WebAssembly 工具链与临时产物 ----
+_zig/
+_zigcache/
+_zig.zip
+cloudflared.exe
+wasm_out.bmp
+srv.log
+srv.err
+cf.log
+cf.err
