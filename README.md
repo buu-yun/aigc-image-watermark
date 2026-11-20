@@ -1,5 +1,11 @@
 # AIGC 图像可信水印引擎 · 里程碑 M1 交付包
 
+[![M1 已交付](https://img.shields.io/badge/M1-LSB%20%E9%9A%90%E5%86%99-blue)](https://github.com/buu-yun/aigc-image-watermark/releases/tag/v0.1.0-m1)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![C99](https://img.shields.io/badge/C-C99-orange.svg)](#)
+[![无第三方依赖](https://img.shields.io/badge/dependencies-none-brightgreen.svg)](#)
+[![Web 演示](https://img.shields.io/badge/demo-serve.bat-8b5cf6.svg)](#35-网页版把引擎变成别人能打开的网址)
+
 > 目标：**能藏能取** —— 手写 24 位 BMP 读写 + LSB 隐写，跑通最小闭环。
 > 约束：纯 C99 + 标准库，Windows + gcc，无第三方依赖。
 
