@@ -62,10 +62,10 @@ wm.exe verify -i jpeg75.bmp -q
 
 echo.
 echo [7/7] tamper tests
-echo   (a) paint a small patch (1.8%%) -> text still readable, pixels touched => [SUSPICIOUS]
+echo   (a) paint a small patch 1.8 percent: text still readable, verdict should be SUSPICIOUS
 wm.exe tamper -i stego_m2.bmp -o t_mid.bmp -r 300,200,120,120
 wm.exe verify -i t_mid.bmp -q
-echo   (b) paint a large area over the header -> checksum fails => [FAKE]
+echo   (b) paint a large area over the header: checksum fails, verdict should be FAKE
 wm.exe tamper -i stego_m2.bmp -o t_heavy.bmp -r 10,10,900,650
 wm.exe verify -i t_heavy.bmp -q
 
