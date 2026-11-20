@@ -1,0 +1,55 @@
+# ============================================================
+#  与「AIGC 图像可信水印引擎」无关的本地内容，一律不入库
+#  （工作区里还有其它比赛的 PPT 素材，47MB，不能混进来）
+# ============================================================
+challenge/
+挑战杯答辩PPT_提示词.md
+*.pptx
+*.docx
+*.pdf
+
+# ---- 编译产物 ----
+*.exe
+*.o
+*.obj
+*.dll
+*.a
+*.lib
+
+# ---- 运行/演示产物（用 make_test_image.exe 与 demo.bat 可随时重新生成）----
+test_image.bmp
+stego.bmp
+tampered.bmp
+topdown.bmp
+web_stego.bmp
+web_jpg_upload.bmp
+web_jpg_stego.bmp
+tiny.bmp
+tiny_s.bmp
+probe.bmp
+probe.txt
+one.bmp
+one_s.bmp
+s2.bmp
+notbmp.dat
+fake.png
+extracted.txt
+tampered.txt
+topdown.txt
+
+# ---- 服务端日志与临时文件 ----
+server.log
+server_err.log
+*.log
+*.tmp
+_cdp*.ps1
+_check.js
+_c.js
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store

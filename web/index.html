@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIGC 图像可信水印引擎</title>
+<style>
+  :root{
+    --bg:#0f172a; --card:#ffffff; --ink:#0f172a; --muted:#64748b;
+    --line:#e2e8f0; --accent:#2563eb; --accent2:#7c3aed;
+    --ok:#059669; --warn:#d97706; --err:#dc2626;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:32px 16px 64px;
+    font-family:"Microsoft YaHei","PingFang SC","Segoe UI",system-ui,sans-serif;
+    background:
+      radial-gradient(1200px 500px at 50% -10%, rgba(124,58,237,.25), transparent 60%),
+      radial-gradient(900px 400px at 90% 10%, rgba(37,99,235,.20), transparent 60%),
+      var(--bg);
+    color:var(--ink); min-height:100vh;
+  }
+  .wrap{max-width:860px;margin:0 auto}
+  header{text-align:center;color:#fff;margin-bottom:26px}
+  header h1{margin:0 0 8px;font-size:26px;letter-spacing:.5px}
+  header p{margin:0;color:#c7d2fe;font-size:14px}
+  .card{background:var(--card);border-radius:16px;padding:22px;box-shadow:0 18px 50px rgba(2,6,23,.35)}
+  .tabs{display:flex;gap:8px;background:#f1f5f9;padding:5px;border-radius:12px;margin-bottom:20px}
+  .tabs button{
+    flex:1;border:0;background:transparent;padding:11px;border-radius:9px;
+    font-size:15px;font-weight:600;color:var(--muted);cursor:pointer;transition:.15s
+  }
+  .tabs button.on{background:#fff;color:var(--accent);box-shadow:0 2px 8px rgba(2,6,23,.10)}
+  .drop{
+    border:2px dashed #cbd5e1;border-radius:12px;padding:26px 16px;text-align:center;
+    color:var(--muted);cursor:pointer;transition:.15s;background:#f8fafc
+  }
+  .drop:hover,.drop.over{border-color:var(--accent);background:#eff6ff;color:var(--accent)}
+  .drop b{display:block;font-size:15px;color:var(--ink);margin-bottom:6px}
+  .drop small{font-size:12px}
+  .hint{margin:10px 0 0;font-size:12.5px;color:var(--muted);line-height:1.7}
+  .meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px;font-size:12.5px}
+  .meta span{background:#f1f5f9;border-radius:8px;padding:6px 10px;color:#334155}
+  .meta b{color:var(--accent)}
+  textarea{
+    width:100%;min-height:104px;margin-top:14px;padding:12px;border:1px solid var(--line);
+    border-radius:10px;font-family:inherit;font-size:14px;resize:vertical;outline:none
+  }
+  textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(37,99,235,.12)}
+  .row{display:flex;gap:10px;align-items:center;margin-top:14px;flex-wrap:wrap}
+  .btn{
+    border:0;border-radius:10px;padding:12px 22px;font-size:15px;font-weight:600;color:#fff;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));cursor:pointer;transition:.15s
+  }
+  .btn:hover{filter:brightness(1.08)}
+  .btn:disabled{opacity:.5;cursor:not-allowed;filter:none}
+  .btn.ghost{background:#f1f5f9;color:#334155}
+  .status{margin-top:16px;font-size:14px;line-height:1.7;padding:12px 14px;border-radius:10px;display:none}
+  .status.show{display:block}
+  .status.ok{background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0}
+  .status.warn{background:#fffbeb;color:#92400e;border:1px solid #fde68a}
+  .status.err{background:#fef2f2;color:#991b1b;border:1px solid #fecaca}
+  .status.info{background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe}
+  .result{margin-top:16px;display:none}
+  .result.show{display:block}
+  .preview{
+    display:block;max-width:100%;border-radius:10px;border:1px solid var(--line);
+    margin-bottom:12px;background:#f8fafc
+  }
+  pre{
+    background:#0f172a;color:#e2e8f0;padding:14px;border-radius:10px;overflow:auto;
+    font-size:13px;line-height:1.65;white-space:pre-wrap;word-break:break-word;margin:0
+  }
+  .badge{display:inline-block;padding:3px 9px;border-radius:999px;font-size:12px;font-weight:700;margin-bottom:10px}
+  .badge.ok{background:#d1fae5;color:#065f46}
+  .badge.warn{background:#fef3c7;color:#92400e}
+  .badge.err{background:#fee2e2;color:#991b1b}
+  footer{margin-top:22px;text-align:center;color:#94a3b8;font-size:12.5px;line-height:1.8}
+  footer b{color:#c7d2fe}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>AIGC 图像可信水印引擎</h1>
+    <p>把文字藏进图片 · 提取出来验证有没有被改过 · 纯 C 实现，浏览器上传即可</p>
+  </header>
+
+  <div class="card">
+    <div class="tabs">
+      <button id="tabEmbed" class="on" onclick="switchTab('embed')">① 嵌入水印</button>
+      <button id="tabExtract" onclick="switchTab('extract')">② 提取 / 验真</button>
+    </div>
+
+    <!-- ============ 嵌入 ============ -->
+    <section id="panelEmbed">
+      <div class="drop" id="dropEmbed">
+        <b>点击选择图片，或把图片拖到这里</b>
+        <small>支持 JPG / PNG / BMP（网页自动转成 24 位 BMP 再嵌入）；建议 512×512 以上</small>
+      </div>
+      <input type="file" id="fileEmbed" accept="image/*,.bmp" class="hidden">
+
+      <div class="meta" id="metaEmbed" style="display:none">
+        <span>尺寸 <b id="mSize">—</b></span>
+        <span>可藏容量 <b id="mCap">—</b></span>
+        <span>消息占用 <b id="mUse">—</b></span>
+      </div>
+
+      <textarea id="txt" placeholder="在这里输入要藏进图片的文字（中文、英文、多行都行）。建议写：作者/团队 + 生成模型 + 时间戳 + 内容哈希。"></textarea>
+
+      <div class="row">
+        <button class="btn" id="btnEmbed" onclick="doEmbed()" disabled>开始嵌入</button>
+        <button class="btn ghost" onclick="resetEmbed()">重选</button>
+      </div>
+
+      <div class="status" id="stEmbed"></div>
+
+      <div class="result" id="resEmbed">
+        <img id="imgOut" class="preview" alt="带水印的图片">
+        <div class="row">
+          <a id="dl" class="btn" download="watermarked.bmp">下载带水印的图片</a>
+          <span class="hint" style="margin:0">请保存为 BMP：转成 JPG / 截图 / 微信转发都会破坏 LSB 水印（这正是它能验真的原因）。</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 提取 ============ -->
+    <section id="panelExtract" class="hidden">
+      <div class="drop" id="dropExtract">
+        <b>点击选择图片，或把图片拖到这里</b>
+        <small>把之前下载的带水印图片原样传回来（不要用截图或转发后的版本）</small>
+      </div>
+      <input type="file" id="fileExtract" accept="image/*,.bmp" class="hidden">
+
+      <div class="row">
+        <button class="btn" id="btnExtract" onclick="doExtract()" disabled>提取水印</button>
+        <button class="btn ghost" onclick="resetExtract()">重选</button>
+      </div>
+
+      <div class="status" id="stExtract"></div>
+      <div class="result" id="resExtract">
+        <div id="badgeWrap"></div>
+        <pre id="outText"></pre>
+      </div>
+    </section>
+  </div>
+
+  <footer>
+    技术路线：<b>LSB 隐写（本页）</b> 负责"一改就坏"的篡改检测，<b>DCT 频域水印（M2）</b> 负责抗 JPEG 的鲁棒溯源。<br>
+    本页所有处理都在你启动的这台机器上完成，图片不上传第三方服务器。
+  </footer>
+</div>
+
+<script src="wm.js"></script>
+<script>
+/* ================= 通用 ================= */
+const $ = id => document.getElementById(id);
+
+function fmt(n){
+  if (n < 1024) return n + ' B';
+  if (n < 1024*1024) return (n/1024).toFixed(1) + ' KB';
+  return (n/1024/1024).toFixed(2) + ' MB';
+}
+
+function setStatus(el, kind, html){
+  el.className = 'status show ' + kind;
+  el.innerHTML = html;
+}
+
+/* 图片 → 24 位 BMP 的转换在 wm.js 里（与自检页共用同一份代码，保证测的就是线上跑的） */
+
+/* ================= 嵌入 ================= */
+let embedFile = null, embedBmp = null, embedW = 0, embedH = 0;
+
+function wireDrop(dropEl, inputEl, onPick){
+  dropEl.addEventListener('click', () => inputEl.click());
+  inputEl.addEventListener('change', () => { if (inputEl.files[0]) onPick(inputEl.files[0]); });
+  ['dragenter','dragover'].forEach(t => dropEl.addEventListener(t, e => {
+    e.preventDefault(); dropEl.classList.add('over');
+  }));
+  ['dragleave','drop'].forEach(t => dropEl.addEventListener(t, e => {
+    e.preventDefault(); dropEl.classList.remove('over');
+  }));
+  dropEl.addEventListener('drop', e => {
+    const f = e.dataTransfer.files[0];
+    if (f) onPick(f);
+  });
+}
+
+async function onPickEmbed(file){
+  const st = $('stEmbed');
+  try {
+    setStatus(st, 'info', '正在读取并转换图片…');
+    const r = await WM.fileToBmp(file);
+    embedFile = file; embedBmp = r.bmp; embedW = r.w; embedH = r.h;
+
+    const cap = WM.capacityOf(r.w, r.h);
+    $('metaEmbed').style.display = 'flex';
+    $('mSize').textContent = r.w + '×' + r.h;
+    $('mCap').textContent  = fmt(cap);
+    updateUsage();
+
+    if (cap < 200) {
+      setStatus(st, 'err', '图片太小，容量不足 200 字节，请换更大的图（建议 512×512 以上）。');
+      $('btnEmbed').disabled = true;
+    } else {
+      setStatus(st, 'ok', '图片已就绪：' + file.name + '（' + fmt(file.size) + '）。现在输入文字，点“开始嵌入”。');
+      $('btnEmbed').disabled = false;
+    }
+    $('resEmbed').classList.remove('show');
+  } catch (err) {
+    setStatus(st, 'err', '图片读取失败：' + err.message);
+    $('btnEmbed').disabled = true;
+  }
+}
+
+function updateUsage(){
+  if (!embedBmp) return;
+  const bytes = new TextEncoder().encode($('txt').value).length;
+  const cap = WM.capacityOf(embedW, embedH);
+  const need = bytes + 10;                       // 10 字节文件头
+  const pct = cap > 0 ? (need * 100 / cap).toFixed(2) : '0';
+  $('mUse').textContent = bytes + ' 字节（含头 ' + need + ' B，占 ' + pct + '%）';
+  const okBtn = $('btnEmbed');
+  if (bytes === 0) { okBtn.disabled = true; }
+  else if (need > cap) { okBtn.disabled = true; setStatus($('stEmbed'), 'err',
+      '消息太长：需要 ' + need + ' 字节，这张图只能放 ' + cap + ' 字节。请缩短文字或换更大的图。'); }
+  else { okBtn.disabled = false; }
+}
+$('txt').addEventListener('input', updateUsage);
+wireDrop($('dropEmbed'), $('fileEmbed'), onPickEmbed);
+
+async function doEmbed(){
+  const st = $('stEmbed'), btn = $('btnEmbed');
+  if (!embedBmp) return;
+
+  const text = $('txt').value;
+  if (new TextEncoder().encode(text).length === 0) {
+    setStatus(st, 'err', '请输入要嵌入的文字。');
+    return;
+  }
+
+  btn.disabled = true;
+  setStatus(st, 'info', '正在嵌入水印…');
+  const t0 = performance.now();
+
+  try {
+    const r = await WM.postEmbed(embedBmp, text);
+    const ms = (performance.now() - t0).toFixed(0);
+
+    const url = URL.createObjectURL(r.blob);
+    $('imgOut').src = url;
+    const a = $('dl');
+    a.href = url;
+    a.download = (embedFile.name.replace(/\.[^.]+$/, '') || 'image') + '_watermarked.bmp';
+
+    setStatus(st, 'ok',
+      '嵌入成功：消息 ' + r.msgLen + ' 字节，耗时 ' + ms + ' ms，图片容量 ' + r.capacity + ' 字节。' +
+      '下载后请保存为 BMP，别转 JPG/截图。');
+    $('resEmbed').classList.add('show');
+  } catch (err) {
+    setStatus(st, 'err', '嵌入失败：' + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function resetEmbed(){
+  embedFile = embedBmp = null; embedW = embedH = 0;
+  $('metaEmbed').style.display = 'none';
+  $('resEmbed').classList.remove('show');
+  $('stEmbed').className = 'status';
+  $('btnEmbed').disabled = true;
+  $('fileEmbed').value = '';
+}
+
+/* ================= 提取 ================= */
+let extractBmp = null;
+
+async function onPickExtract(file){
+  const st = $('stExtract');
+  try {
+    setStatus(st, 'info', '正在读取图片…');
+    const r = await WM.fileToBmp(file);
+    extractBmp = r.bmp;
+    $('btnExtract').disabled = false;
+    setStatus(st, 'ok', '已选择：' + file.name + '（' + r.w + '×' + r.h + '，' + fmt(file.size) + '）。点“提取水印”。');
+    $('resExtract').classList.remove('show');
+  } catch (err) {
+    setStatus(st, 'err', '图片读取失败：' + err.message);
+    $('btnExtract').disabled = true;
+  }
+}
+wireDrop($('dropExtract'), $('fileExtract'), onPickExtract);
+
+async function doExtract(){
+  if (!extractBmp) return;
+  const st = $('stExtract'), btn = $('btnExtract');
+  btn.disabled = true;
+  setStatus(st, 'info', '正在提取…');
+
+  try {
+    const { status, text } = await WM.postExtract(extractBmp);
+
+    const bw = $('badgeWrap');
+    if (status === 'OK') {
+      $('outText').textContent = text;
+      bw.innerHTML = '<span class="badge ok">✓ 水印完整</span>';
+      setStatus(st, 'ok',
+        '取回 ' + new TextEncoder().encode(text).length + ' 字节，内容与嵌入时完全一致 ' +
+        '—— 这张图的像素没有被改过。');
+      $('resExtract').classList.add('show');
+    } else if (status === 'NOT_FOUND') {
+      $('outText').textContent = '（这张图里没有找到水印比特）';
+      bw.innerHTML = '<span class="badge err">✗ 未检测到水印</span>';
+      setStatus(st, 'err',
+        '未检测到水印。可能原因：① 这张图从未嵌入过水印；② 图片被改过/转成 JPG/截图/微信转发，' +
+        'LSB 比特已被抹掉。M1 无法区分这两种情况，M2 的 CRC 会给出确定结论。');
+      $('resExtract').classList.add('show');
+    } else {
+      $('outText').textContent = '（水印头部损坏）';
+      bw.innerHTML = '<span class="badge warn">! 头部损坏</span>';
+      setStatus(st, 'warn',
+        '找到类似水印的痕迹，但头部（魔数/版本/长度）不合法 —— 图片很可能被局部篡改。');
+      $('resExtract').classList.add('show');
+    }
+  } catch (err) {
+    setStatus(st, 'err', '提取失败：' + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function resetExtract(){
+  extractBmp = null;
+  $('resExtract').classList.remove('show');
+  $('stExtract').className = 'status';
+  $('btnExtract').disabled = true;
+  $('fileExtract').value = '';
+}
+
+/* ================= Tab ================= */
+function switchTab(which){
+  const isEmbed = which === 'embed';
+  $('tabEmbed').classList.toggle('on', isEmbed);
+  $('tabExtract').classList.toggle('on', !isEmbed);
+  $('panelEmbed').classList.toggle('hidden', !isEmbed);
+  $('panelExtract').classList.toggle('hidden', isEmbed);
+}
+
+/* 打开页面时探一下服务是否活着 */
+fetch('/api/health').then(r => r.text()).then(t => {
+  if (t.trim() !== 'ok') console.warn('服务未就绪');
+}).catch(() => {
+  setStatus($('stEmbed'), 'err', '连不上本地服务：请确认 wm_server.exe 正在运行。');
+});
+</script>
+</body>
+</html>

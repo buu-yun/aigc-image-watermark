@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>前端自检</title>
+<style>
+  body{margin:0;padding:28px 16px 60px;background:#0f172a;color:#e2e8f0;
+       font-family:"Microsoft YaHei","Segoe UI",system-ui,sans-serif}
+  .wrap{max-width:760px;margin:0 auto}
+  h1{font-size:21px;margin:0 0 6px}
+  p.sub{margin:0 0 20px;color:#94a3b8;font-size:13px}
+  .box{background:#111c33;border:1px solid #1e293b;border-radius:14px;padding:18px}
+  .sum{display:flex;gap:10px;align-items:center;margin-bottom:14px;font-size:15px;font-weight:700}
+  .pill{padding:4px 12px;border-radius:999px;font-size:13px}
+  .pill.pass{background:#d1fae5;color:#065f46}
+  .pill.fail{background:#fee2e2;color:#991b1b}
+  .pill.wait{background:#1e293b;color:#94a3b8}
+  ul{list-style:none;padding:0;margin:0;font-size:14px;line-height:2}
+  li{display:flex;gap:10px;border-bottom:1px dashed #1e293b;padding:2px 0}
+  li:last-child{border:0}
+  .ok{color:#34d399;font-weight:700;min-width:52px}
+  .no{color:#f87171;font-weight:700;min-width:52px}
+  .ex{color:#64748b;font-size:12.5px}
+  a{color:#93c5fd}
+  code{background:#1e293b;padding:1px 6px;border-radius:5px;font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>前端自检 · 浏览器这条路是否真的通</h1>
+  <p class="sub">
+    本页在浏览器里用 canvas 现画一张图 → 存成 JPEG（模拟用户上传照片）→ 走 <code>wm.js</code> 转 BMP →
+    调用服务端嵌入 → 再取回提取，全程用的就是「① 嵌入水印」页里那份代码。
+  </p>
+
+  <div class="box">
+    <div class="sum"><span id="pill" class="pill wait">运行中…</span><span id="cnt">0 / 0</span></div>
+    <ul id="list"></ul>
+    <p class="sub" style="margin:14px 0 0">
+      注：第 6 项涂改 60×60（约占画面 1.4%）才会稳定命中水印比特；更小的改动（&lt;0.05% 面积）会漏检，
+      这是 LSB 的已知局限，灵敏度实测表见 README 第 4.4 节。
+    </p>
+  </div>
+</div>
+
+<script src="wm.js"></script>
+<script>
+const list = document.getElementById('list');
+let pass = 0, total = 0;
+
+function log(ok, name, extra){
+  total++;
+  if (ok) pass++;
+  const li = document.createElement('li');
+  li.innerHTML = '<span class="' + (ok ? 'ok' : 'no') + '">' + (ok ? 'PASS' : 'FAIL') + '</span>' +
+                 '<span>' + name + (extra ? ' <span class="ex">' + extra + '</span>' : '') + '</span>';
+  list.appendChild(li);
+  document.getElementById('cnt').textContent = pass + ' / ' + total;
+}
+
+function fmt(n){ return n < 1024 ? n + ' B' : (n/1024).toFixed(1) + ' KB'; }
+
+/* 画一张 512×512 的合成图，存成 JPEG —— 模拟用户随手丢进来的照片 */
+async function makeJpeg(w, h){
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d');
+  const g = ctx.createLinearGradient(0, 0, w, h);
+  g.addColorStop(0, '#1e3a8a');
+  g.addColorStop(1, '#f59e0b');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + Math.round(w / 10) + 'px sans-serif';
+  ctx.fillText('AIGC', w * 0.08, h * 0.22);
+  ctx.fillStyle = '#0b1220';
+  for (let i = 0; i < 8; i++) ctx.fillRect(w * 0.08 + i * w * 0.11, h * 0.3, w * 0.05, w * 0.05);
+  return await new Promise(r => cv.toBlob(r, 'image/jpeg', 0.92));
+}
+
+(async function run(){
+  const TEXT = 'AIGC 可信水印 · 前端自检\n作者: 隐写溯源小队\n时间戳: ' + new Date().toISOString();
+
+  try {
+    /* 0. 服务是否活着 */
+    const health = await fetch('/api/health').then(r => r.text());
+    log(health.trim() === 'ok', '服务在线（/api/health 返回 ok）');
+
+    /* 1. 生成 JPEG */
+    const jpeg = await makeJpeg(512, 512);
+    log(jpeg.size > 1000, '生成 512×512 JPEG', fmt(jpeg.size));
+
+    /* 2. JPEG → 24 位 BMP（wm.js 真身） */
+    const f1 = new File([jpeg], 'test.jpg', { type: 'image/jpeg' });
+    const a = await WM.fileToBmp(f1);
+    const capA = WM.capacityOf(a.w, a.h);
+    const magic = new Uint8Array(a.bmp, 0, 2);
+    log(a.w === 512 && a.h === 512 && magic[0] === 0x42 && magic[1] === 0x4D,
+        'JPEG 被转成 24 位 BMP', a.w + '×' + a.h + '，' + fmt(a.bmp.byteLength) + '，容量 ' + capA + ' 字节');
+
+    /* 3. 嵌入 */
+    const r1 = await WM.postEmbed(a.bmp, TEXT);
+    const ab1 = await r1.blob.arrayBuffer();
+    log(ab1.byteLength > 1000 && String(r1.msgLen) === String(new TextEncoder().encode(TEXT).length),
+        '嵌入成功并拿回带水印的 BMP', fmt(ab1.byteLength) + '，消息 ' + r1.msgLen + ' 字节');
+
+    /* 4. 再由「BMP 原样送回」这条路提取 */
+    const f2 = new File([r1.blob], 'wm.bmp', { type: 'image/bmp' });
+    const b = await WM.fileToBmp(f2);            // 已是 BMP → 应原样透传
+    const r2 = await WM.postExtract(b.bmp);
+    log(r2.status === 'OK' && r2.text === TEXT, '提取内容与原文逐字节一致', 'status=' + r2.status);
+
+    /* 5. 未嵌入的图必须判「没有水印」 */
+    const r3 = await WM.postExtract(a.bmp);
+    log(r3.status === 'NOT_FOUND', '未嵌入的图返回 NOT_FOUND', 'status=' + r3.status);
+
+    /* 6. 涂改 60×60 一块区域后不能再取回原文（判据与命令行 wm tamper 一致） */
+    const W = 512, H = 512, stride = (W * 3 + 3) & ~3;
+    const t = new Uint8Array(ab1.slice(0));
+    for (let row = 100; row < 160; row++) {
+      const off = 54 + (H - 1 - row) * stride + 100 * 3;   // BMP 自下而上存
+      for (let i = 0; i < 60 * 3; i++) t[off + i] = 255;
+    }
+    const r4 = await WM.postExtract(t.buffer);
+    const changed = r4.status !== 'OK' || r4.text !== TEXT;
+    log(changed, '涂改 60×60 区域后取不回原文', 'status=' + r4.status);
+
+    /* 7. 容量不足时给出可读的中文错误，而不是崩掉 */
+    const tiny = await makeJpeg(32, 32);
+    const f3 = new File([tiny], 'tiny.jpg', { type: 'image/jpeg' });
+    const c = await WM.fileToBmp(f3);
+    let errMsg = '';
+    try { await WM.postEmbed(c.bmp, 'x'.repeat(500)); }
+    catch (e) { errMsg = e.message; }
+    log(/容量|不足/.test(errMsg), '容量不足时返回中文错误', errMsg.slice(0, 42) + '…');
+
+  } catch (e) {
+    log(false, '未捕获异常', e.message);
+  }
+
+  const pill = document.getElementById('pill');
+  pill.className = 'pill ' + (pass === total ? 'pass' : 'fail');
+  pill.textContent = pass === total ? '全部通过' : '存在失败';
+  document.title = (pass === total ? 'PASS' : 'FAIL') + ' ' + pass + '/' + total;
+  document.body.setAttribute('data-result', pass + '/' + total);
+})();
+</script>
+</body>
+</html>
