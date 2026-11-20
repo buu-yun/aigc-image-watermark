@@ -6,6 +6,10 @@
 [![无第三方依赖](https://img.shields.io/badge/dependencies-none-brightgreen.svg)](#)
 [![Web 演示](https://img.shields.io/badge/demo-serve.bat-8b5cf6.svg)](#35-网页版把引擎变成别人能打开的网址)
 
+### 👉 在线试用（免安装、免注册、图片不上传）：**https://buu-yun.github.io/aigc-image-watermark/**
+
+> 那个页面里跑的不是 JS 复刻，而是把 `bmp.c` / `lsb.c` 用 clang 编成的 **7 KB WebAssembly** —— 同一份 C 源码，跑在你浏览器里。
+
 > 目标：**能藏能取** —— 手写 24 位 BMP 读写 + LSB 隐写，跑通最小闭环。
 > 约束：纯 C99 + 标准库，Windows + gcc，无第三方依赖。
 
@@ -65,6 +69,11 @@ build.bat           :: 只要编译产物
 | `web/index.html` | 浏览器界面：上传→嵌入→下载 / 提取验真 | ~330 |
 | `web/wm.js` | 前端公共逻辑：JPG/PNG→24 位 BMP、请求封装 | ~130 |
 | `web/selftest.html` | 前端自检页（浏览器里跑 8 项断言） | ~150 |
+| `wasm/wm_glue.c` | 把引擎包成 wasm 接口：`wm_embed` / `wm_extract` / `wm_capacity` | ~120 |
+| `wasm/build_wasm.bat` | 一条命令产出 `wm.wasm`（zig cc） | — |
+| `wasm/pack_static.ps1` | 把 wasm 以 base64 内嵌，产出单文件站点 | — |
+| `wasm/test_wasm.mjs` | node 端到端自检（7 项） | ~60 |
+| `docs/index.html` | **可托管的单文件整站**（GitHub Pages 就是它） | 29.8 KB |
 | `run_m1_acceptance.ps1` | 一键验收（编译→嵌入→提取→比对→篡改测试） | ~80 |
 | `sample_msg_utf8.txt` | 中文 UTF-8 测试消息（324 字节） | — |
 | `test_image.bmp` | 512×512 测试载体 | 786 KB |
@@ -164,7 +173,35 @@ AIGC 可信水印测试消息 v1.0
 
 ## 3.5 网页版：把引擎变成"别人能打开的网址"
 
-### 启动
+### 在线版：C 编译成 WebAssembly（推荐给别人看）
+
+上面那个 `wm_server.exe` 需要你的电脑开着。如果只想给别人一个**永久链接**、谁都能点开，用这个：
+
+**https://buu-yun.github.io/aigc-image-watermark/**
+
+- 引擎 = `bmp.c` + `lsb.c` + `wasm/wm_glue.c` 用 `clang`（zig cc）编成的 **7 KB wasm**；
+- 页面 = **单个 29.8 KB 的 HTML**，wasm 以 base64 内嵌，`file://` 双击也能跑；
+- **无后端、无网络请求**，图片根本不出浏览器，所以能白嫖 GitHub Pages 这类纯静态托管。
+
+重建方法：
+
+```bat
+wasm\build_wasm.bat                              :: C -> wm.wasm
+powershell -File wasm\pack_static.ps1            :: 内嵌 base64 -> docs\index.html
+```
+
+体积优化的关键：编译时用 `-Dprintf=wm_noop_printf` 把日志换成空函数，wasm 从 **1 MB 掉到 7 KB**
+（否则 wasi-libc 的整套格式化输出会被拖进来）。这个取舍在答辩里可以讲一句：**"嵌入式环境下，printf 是奢侈品"**。
+
+验证链（三层互证）：
+
+| 验证 | 结果 |
+|---|---|
+| `node wasm/test_wasm.mjs` | 7/7（容量/嵌入/提取/NOT_FOUND/错误码） |
+| 本地 `wm.exe` 提取 wasm 生成的图 | 成功 → **两套实现字节级互通** |
+| Edge headless 打开公网地址 | 页面自检 7/7，选图→嵌入 21~159 ms |
+
+### 启动本地服务版
 
 ```bat
 serve.bat
