@@ -20,6 +20,7 @@
  */
 #include "bmp.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -65,6 +66,17 @@ static void wr32(uint8_t *p, uint32_t v)
 static size_t row_stride(int width)
 {
     return (((size_t)width * 3u) + 3u) & ~(size_t)3u;
+}
+
+/* 把 errno 翻成人话（Windows 上最常见的就是"只读/被占用"） */
+static const char *os_reason(int e)
+{
+    switch (e) {
+    case EACCES: return "拒绝访问：文件只读，或正被其它程序（看图软件/微信/杀软）占用";
+    case ENOENT: return "路径不存在";
+    case ENOSPC: return "磁盘空间不足";
+    default:     return strerror(e);
+    }
 }
 
 /* ---------------- 生命周期 ---------------- */
@@ -270,7 +282,10 @@ int bmp_save(const BmpImage *img, const char *path)
 
     FILE *fp = fopen(path, "wb");
     if (!fp) {
-        fprintf(stderr, "[bmp] 无法创建文件: %s\n", path);
+        /* 把系统原因也打出来：Windows 上多半是文件被占用/只读，或权限状态异常 */
+        fprintf(stderr, "[bmp] 无法创建文件: %s（%s）\n", path, os_reason(errno));
+        fprintf(stderr, "[bmp] 提示: 若该文件正在被看图软件/微信打开，请关闭后重试；"
+                        "或先删除它，或换一个输出文件名。\n");
         free(buf);
         return -1;
     }
