@@ -12,7 +12,7 @@ function Check([bool]$cond, [string]$name) {
 }
 
 Write-Host "=== 0. 编译 ==="
-$out = & gcc -std=c99 -O2 -Wall -Wextra -o wm.exe bmp.c lsb.c main.c 2>&1 | Out-String
+$out = & gcc -std=c99 -O2 -Wall -Wextra -o wm.exe bmp.c lsb.c crc16.c dct.c dctwm.c main.c -lm 2>&1 | Out-String
 Check ($LASTEXITCODE -eq 0 -and $out.Trim() -eq '') "wm.exe 编译通过且零警告"
 $null = & gcc -std=c99 -O2 -Wall -Wextra -o make_test_image.exe make_test_image.c bmp.c 2>&1
 Check ($LASTEXITCODE -eq 0) "make_test_image.exe 编译通过"
@@ -26,7 +26,7 @@ $null = .\wm.exe selftest
 Check ($LASTEXITCODE -eq 0) "wm selftest 全部通过"
 
 Write-Host "=== 3. 中文消息嵌入 ==="
-$null = .\wm.exe embed -i test_image.bmp -o stego.bmp -f sample_msg_utf8.txt -q
+$null = .\wm.exe embed -i test_image.bmp -o stego.bmp -f sample_msg_utf8.txt -m lsb -q
 Check ($LASTEXITCODE -eq 0) "embed 返回 0"
 Check (Test-Path stego.bmp) "生成 stego.bmp"
 
@@ -64,7 +64,7 @@ Remove-Item probe.txt -ErrorAction SilentlyContinue
 Write-Host "=== 7. 边界与异常 ==="
 $null = .\make_test_image.exe tiny.bmp 32 32
 $big = 'x' * 400
-$null = .\wm.exe embed -i tiny.bmp -o tiny_s.bmp -t $big 2>$null
+$null = .\wm.exe embed -i tiny.bmp -o tiny_s.bmp -t $big -m lsb 2>$null
 Check ($LASTEXITCODE -ne 0) "消息超出容量时返回非 0"
 $null = .\wm.exe extract -i test_image.bmp -q 2>$null
 Check ($LASTEXITCODE -ne 0) "未水印图提取返回非 0"

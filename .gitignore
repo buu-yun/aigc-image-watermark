@@ -64,3 +64,22 @@ srv.log
 srv.err
 cf.log
 cf.err
+# ---- M2 演示产物 ----
+big.bmp
+big_stego.bmp
+heavy.bmp
+mid.bmp
+cropped.bmp
+cover_m2.bmp
+stego_m2.bmp
+jpeg75.bmp
+jpeg75.jpg
+q*.bmp
+q*.jpg
+t_*.bmp
+_t.bmp
+big_t.bmp
+got*.txt
+msg_m2.txtj75.bmp
+j75.jpg
+q*.txt

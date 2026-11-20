@@ -5,7 +5,7 @@ rem  M1 build script  (C99 / MinGW gcc)
 rem  Usage:  build.bat
 rem ================================================================
 echo [1/3] building wm.exe ...
-gcc -std=c99 -O2 -Wall -Wextra -o wm.exe bmp.c lsb.c main.c
+gcc -std=c99 -O2 -Wall -Wextra -o wm.exe bmp.c lsb.c crc16.c dct.c dctwm.c main.c -lm
 if errorlevel 1 (
     echo BUILD FAILED: wm.exe
     exit /b 1

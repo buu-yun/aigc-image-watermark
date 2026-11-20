@@ -47,7 +47,7 @@ if errorlevel 1 goto :fail
 
 echo.
 echo [4/7] embed UTF-8 Chinese message (324 bytes)
-wm.exe embed -i %COVER% -o stego.bmp -f sample_msg_utf8.txt
+wm.exe embed -i %COVER% -o stego.bmp -f sample_msg_utf8.txt -m lsb
 if errorlevel 1 goto :fail
 
 echo.

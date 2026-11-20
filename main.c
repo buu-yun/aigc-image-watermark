@@ -5,12 +5,15 @@
  * 这里用内置测试用例把「能藏能取」变成一条命令给出的 PASS/FAIL，
  * 答辩时可以现场跑，也方便 M2/M3 回归。
  */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 #include "bmp.h"
+#include "crc16.h"
+#include "dctwm.h"
 #include "lsb.h"
 
 /* ==================== 通用工具 ==================== */
@@ -21,10 +24,11 @@ static void usage(void)
         "AI 图像可信水印引擎  M1：LSB 隐写最小闭环\n"
         "\n"
         "用法:\n"
-        "  wm embed    -i <载体.bmp> -o <含水印.bmp> -f <消息.txt> [-q]\n"
+        "  wm embed    -i <载体.bmp> -o <含水印.bmp> -f <消息.txt> [-m dct|lsb] [-q]\n"
         "  wm embed    -i <载体.bmp> -o <含水印.bmp> -t <文本>     [-q]\n"
         "  wm extract  -i <含水印.bmp> [-o <输出.txt>] [-q]\n"
         "  wm info     -i <图片.bmp>\n"
+        "  wm verify   -i <待验.bmp> [-o <明文.txt>]     三态：真 / 可疑 / 假\n"
         "  wm diff     -i <原图.bmp>   -j <含水印.bmp>\n"
         "  wm tamper   -i <图.bmp> -o <改后.bmp> -r <x,y,w,h> [-c B,G,R]\n"
         "  wm selftest\n"
@@ -66,10 +70,12 @@ static uint8_t *read_all(const char *path, size_t *len_out)
 }
 
 /* 统计两图差异：最大通道差、被改动的通道数 */
-static void analyze_diff(const BmpImage *a, const BmpImage *b, int *maxd, size_t *changed)
+static void analyze_diff(const BmpImage *a, const BmpImage *b, int *maxd, size_t *changed,
+                         double *sse_out)
 {
     *maxd    = 0;
     *changed = 0;
+    double sse = 0.0;
     size_t row_bytes = (size_t)a->width * 3u;
 
     for (int y = 0; y < a->height; y++) {
@@ -78,10 +84,12 @@ static void analyze_diff(const BmpImage *a, const BmpImage *b, int *maxd, size_t
         for (size_t i = 0; i < row_bytes; i++) {
             int d = (int)ra[i] - (int)rb[i];
             if (d != 0) (*changed)++;
+            sse += (double)d * (double)d;
             if (d < 0) d = -d;
             if (d > *maxd) *maxd = d;
         }
     }
+    if (sse_out) *sse_out = sse;
 }
 
 /* ==================== embed ==================== */
@@ -90,6 +98,7 @@ static int cmd_embed(int argc, char **argv)
 {
     const char *in_path = NULL, *out_path = NULL, *msg_file = NULL, *msg_text = NULL;
     int quiet = 0;
+    int method = 1;   /* 0=LSB，1=DCT（默认：抗压缩） */
 
     for (int i = 2; i < argc; i++) {
         const char *a = argv[i];
@@ -97,6 +106,12 @@ static int cmd_embed(int argc, char **argv)
         else if (!strcmp(a, "-o") && i + 1 < argc) out_path = argv[++i];
         else if (!strcmp(a, "-f") && i + 1 < argc) msg_file = argv[++i];
         else if (!strcmp(a, "-t") && i + 1 < argc) msg_text = argv[++i];
+        else if (!strcmp(a, "-m") && i + 1 < argc) {
+            const char *m = argv[++i];
+            if (!strcmp(m, "lsb")) method = 0;
+            else if (!strcmp(m, "dct")) method = 1;
+            else { fprintf(stderr, "[err] -m 只能是 dct 或 lsb\n"); return 2; }
+        }
         else if (!strcmp(a, "-q"))                 quiet    = 1;
         else { fprintf(stderr, "[err] 未知参数: %s\n", a); return 2; }
     }
@@ -132,15 +147,34 @@ static int cmd_embed(int argc, char **argv)
 
     if (!quiet) printf("[embed] 载体 %s  %dx%d\n", in_path, img->width, img->height);
 
-    /* 3) 嵌入 */
-    LsbStatus st = lsb_embed(img, msg, msg_len, quiet ? 0 : 1);
-    if (st != LSB_OK) {
-        fprintf(stderr, "[err] 嵌入失败: %s\n", lsb_status_str(st));
-        fprintf(stderr, "[err] 当前图片容量 %zu 字节，消息 %zu 字节（含 10 字节头需 %zu 字节）\n",
-                lsb_capacity_bytes(img), msg_len, msg_len + LSB_HEADER_SIZE);
-        bmp_free(img);
-        free(msg_buf);
-        return 1;
+    /* 3) 嵌入：DCT（默认，抗压缩）或 LSB（脆弱，用于演示篡改） */
+    if (method == 0) {
+        LsbStatus st = lsb_embed(img, msg, msg_len, quiet ? 0 : 1);
+        if (st != LSB_OK) {
+            fprintf(stderr, "[err] 嵌入失败: %s\n", lsb_status_str(st));
+            fprintf(stderr, "[err] LSB 容量 %zu 字节，消息 %zu 字节（含 10 字节头需 %zu 字节）\n",
+                    lsb_capacity_bytes(img), msg_len, msg_len + LSB_HEADER_SIZE);
+            bmp_free(img);
+            free(msg_buf);
+            return 1;
+        }
+    } else {
+        Wm2Status st = wm2_embed(img, msg, msg_len, quiet ? 0 : 1);
+        if (st != WM2_OK) {
+            fprintf(stderr, "[err] 嵌入失败: %s\n", wm2_status_str(st));
+            fprintf(stderr, "[err] DCT 容量 %zu 字节（每块 1 bit、正文 3 份冗余），消息 %zu 字节\n",
+                    wm2_capacity_bytes(img), msg_len);
+            size_t need_side = (size_t)((msg_len * 8 * WM2_REP_PAYLOAD) +
+                                        WM2_HEADER_BITS * WM2_REP_HEADER);
+            fprintf(stderr, "[err] 这张图只有 %zu 个 8x8 块，本次需要 %zu 块；"
+                            "按此消息至少要 %zu x %zu 的图\n",
+                    (size_t)(img->width / 8) * (size_t)(img->height / 8), need_side,
+                    (size_t)(need_side * 8 / (img->height / 8 > 0 ? img->height / 8 : 1) + 8),
+                    (size_t)img->height);
+            bmp_free(img);
+            free(msg_buf);
+            return 1;
+        }
     }
 
     /* 4) 写文件 */
@@ -150,7 +184,9 @@ static int cmd_embed(int argc, char **argv)
         return 1;
     }
 
-    if (!quiet) printf("[embed] 已生成: %s（BMP 无损保存，LSB 不会被重新编码破坏）\n", out_path);
+    if (!quiet)
+        printf("[embed] 已生成: %s（%s，BMP 无损保存）\n", out_path,
+               method == 0 ? "LSB 空域，转 JPG 即失效" : "DCT 频域，可抗 JPEG 压缩");
 
     bmp_free(img);
     free(msg_buf);
@@ -176,7 +212,10 @@ static int cmd_extract(int argc, char **argv)
     BmpImage *img = bmp_load(in_path);
     if (!img) return 1;
 
-    size_t   cap = lsb_capacity_bytes(img);
+    /* 先试 DCT（抗压缩的那一路），没命中再退回 LSB。方法字节写在水印头里，不靠猜。 */
+    size_t   cap = wm2_capacity_bytes(img) + 64u;
+    if (cap < lsb_capacity_bytes(img) + 2u) cap = lsb_capacity_bytes(img) + 2u;
+
     uint8_t *buf = (uint8_t *)malloc(cap + 2u);
     if (!buf) {
         fprintf(stderr, "[err] 内存不足\n");
@@ -184,15 +223,29 @@ static int cmd_extract(int argc, char **argv)
         return 1;
     }
 
-    size_t    len = 0;
-    LsbStatus st  = lsb_extract(img, buf, cap + 1u, &len, quiet ? 0 : 1);
-    bmp_free(img);
+    size_t   len = 0;
+    uint16_t hcrc = 0;
+    Wm2Status ds = wm2_extract(img, buf, cap + 1u, &len, &hcrc, quiet ? 0 : 1);
 
-    if (st != LSB_OK) {
-        fprintf(stderr, "[extract] 失败: %s\n", lsb_status_str(st));
-        free(buf);
-        return 1;
+    if (ds == WM2_OK || ds == WM2_ERR_CRC) {
+        if (ds == WM2_ERR_CRC)
+            fprintf(stderr, "[extract] 警告: %s\n", wm2_status_str(ds));
+        if (ds == WM2_OK && !quiet) printf("[extract] 命中方式: DCT（频域，抗压缩）\n");
+    } else {
+        size_t lcap = lsb_capacity_bytes(img);
+        len = 0;
+        LsbStatus lst = lsb_extract(img, buf, cap + 1u < lcap + 1u ? cap + 1u : lcap + 1u,
+                                    &len, quiet ? 0 : 1);
+        if (lst != LSB_OK) {
+            fprintf(stderr, "[extract] 失败: 两种水印都没找到（%s / %s）\n",
+                    wm2_status_str(ds), lsb_status_str(lst));
+            bmp_free(img);
+            free(buf);
+            return 1;
+        }
+        if (!quiet) printf("[extract] 命中方式: LSB（空域，脆弱）\n");
     }
+    bmp_free(img);
 
     /* 原样输出字节（不做编码转换，UTF-8 进来就 UTF-8 出去） */
     fwrite(buf, 1, len, stdout);
@@ -220,6 +273,85 @@ static int cmd_extract(int argc, char **argv)
     return 0;
 }
 
+/* ==================== verify ==================== */
+
+/*
+ * 三态判定 —— 这是 M2 的核心价值，M1 做不到：
+ *   DCT 的 CRC 通过 = 内容完整（哪怕被压缩过）
+ *   LSB 哨兵吻合   = 像素一个都没动
+ * 两者结合就能区分"正常传播"和"真被改过"：
+ *   真   ：CRC 通过 + 哨兵吻合
+ *   可疑 ：CRC 通过 + 哨兵对不上（被重编码/滤镜/改尺寸，但内容没被编辑）
+ *   假   ：CRC 失败（内容被编辑）
+ *   无水印：读不出有效头
+ */
+static int cmd_verify(int argc, char **argv)
+{
+    const char *in_path = NULL, *out_path = NULL;
+    int quiet = 0;
+
+    for (int i = 2; i < argc; i++) {
+        const char *a = argv[i];
+        if (!strcmp(a, "-i") && i + 1 < argc)      in_path  = argv[++i];
+        else if (!strcmp(a, "-o") && i + 1 < argc) out_path = argv[++i];
+        else if (!strcmp(a, "-q"))                 quiet    = 1;
+        else { fprintf(stderr, "[err] 未知参数: %s\n", a); return 2; }
+    }
+    if (!in_path) { fprintf(stderr, "[err] verify 需要 -i\n"); return 2; }
+
+    BmpImage *img = bmp_load(in_path);
+    if (!img) return 1;
+
+    size_t   cap = wm2_capacity_bytes(img) + 64u;
+    uint8_t *buf = (uint8_t *)malloc(cap + 2u);
+    if (!buf) { bmp_free(img); return 1; }
+
+    size_t   len  = 0;
+    uint16_t hcrc = 0;
+    Wm2Status ds  = wm2_extract(img, buf, cap + 1u, &len, &hcrc, quiet ? 0 : 1);
+
+    int intact = 0;
+    (void)wm2_sentinel_check(img, hcrc, &intact);
+    int dct_crc_ok = (ds == WM2_OK);
+
+    bmp_free(img);
+
+    printf("\n文件: %s\n", in_path);
+    printf("DCT 水印 : %s\n", wm2_status_str(ds));
+    printf("LSB 哨兵 : %d/%d 份完好%s\n", intact, WM2_SENTINEL_COPIES,
+           intact == WM2_SENTINEL_COPIES ? "（像素未被改动）"
+                                         : "（有区域被动过：重编码 / 局部编辑）");
+
+    int code;
+    if (dct_crc_ok && intact == WM2_SENTINEL_COPIES) {
+        printf("结论     : 【真】内容完整，且像素未被改动\n");
+        code = 0;
+    } else if (dct_crc_ok) {
+        printf("结论     : 【可疑】内容可读且 CRC 通过，但像素被改动过\n");
+        printf("           原因可能是重编码/压缩/加滤镜/改尺寸，或局部编辑；\n");
+        printf("           内容本身仍然可信（CRC 通过），但不是原始文件。\n");
+        code = 2;
+    } else if (ds == WM2_ERR_CRC) {
+        printf("结论     : 【假】CRC 校验失败，内容与嵌入时不一致（已被篡改/覆盖）\n");
+        code = 3;
+    } else {
+        printf("结论     : 【无水印】未找到可解析的 DCT 水印\n");
+        code = 4;
+    }
+
+    if (ds == WM2_OK || ds == WM2_ERR_CRC) {
+        printf("取回内容 : %lu 字节\n", (unsigned long)len);
+        fwrite(buf, 1, len, stdout);
+        fputc('\n', stdout);
+        if (out_path) {
+            FILE *fp = fopen(out_path, "wb");
+            if (fp) { fwrite(buf, 1, len, fp); fclose(fp); }
+        }
+    }
+
+    free(buf);
+    return code;
+}
 /* ==================== info ==================== */
 
 static int cmd_info(int argc, char **argv)
@@ -240,7 +372,9 @@ static int cmd_info(int argc, char **argv)
            (img->width * img->height) / 10000);
     printf("格式      : 24 位 BMP，行跨度 %zu 字节\n", img->stride);
     printf("像素缓冲  : %zu 字节\n", img->stride * (size_t)img->height);
-    printf("LSB 容量  : %zu 字节（每像素 3 bit）\n", cap);
+    printf("LSB 容量  : %zu 字节（每像素 3 bit，脆弱，用作篡改哨兵）\n", cap);
+    printf("DCT 容量  : %zu 字节（8x8 块每块 1 bit，正文 3 份冗余，抗 JPEG）\n",
+           wm2_capacity_bytes(img));
 
     uint32_t  mlen = 0;
     LsbStatus st   = lsb_peek(img, &mlen);
@@ -281,10 +415,16 @@ static int cmd_diff(int argc, char **argv)
 
     int    maxd    = 0;
     size_t changed = 0;
-    analyze_diff(a, b, &maxd, &changed);
+    double sse     = 0.0;
+    analyze_diff(a, b, &maxd, &changed, &sse);
 
     size_t total = (size_t)a->width * (size_t)a->height * 3u;
+    double mse   = total ? sse / (double)total : 0.0;
+    double psnr  = (mse > 0.0) ? (10.0 * log10(255.0 * 255.0 / mse)) : 999.0;
+    if (psnr > 99.0) psnr = 99.0;
+
     printf("最大通道差 : %d  (0=完全相同, 1=只有最低位变了)\n", maxd);
+    printf("PSNR      : %.2f dB  （>40 dB 即肉眼不可见；越高越接近原图）\n", psnr);
     printf("改动通道数 : %zu / %zu (%.4f%%)\n", changed, total,
            total ? (double)changed * 100.0 / (double)total : 0.0);
     printf("结论       : %s\n",
@@ -512,7 +652,7 @@ static int cmd_selftest(void)
 
         int    maxd    = 0;
         size_t changed = 0;
-        analyze_diff(orig, steg, &maxd, &changed);
+        analyze_diff(orig, steg, &maxd, &changed, NULL);
 
         check(maxd <= 1, "嵌入后最大通道差 <= 1（肉眼不可见）");
         check(changed > 0, "确实改动了像素（不是空操作）");
@@ -594,6 +734,73 @@ static int cmd_selftest(void)
         bmp_free(img);
     }
 
+    /* ---- 用例 8：DCT 往返 + CRC + 哨兵 ---- */
+    {
+        printf("[用例8] DCT 频域往返（M2 核心）\n");
+        BmpImage *img = bmp_create(512, 512);
+        fill_test_image(img);
+
+        const char *text = "DCT-ROUNDTRIP 频域水印往返测试 ✓";
+        size_t      tlen = strlen(text);
+
+        check(wm2_capacity_bytes(img) >= tlen, "512x512 的 DCT 容量够放这条消息");
+        check(wm2_embed(img, (const uint8_t *)text, tlen, 0) == WM2_OK, "DCT 嵌入成功");
+
+        uint8_t  out[512];
+        size_t   got = 0;
+        uint16_t hc  = 0;
+        Wm2Status st = wm2_extract(img, out, sizeof(out), &got, &hc, 0);
+        check(st == WM2_OK && got == tlen && memcmp(out, text, tlen) == 0,
+              "DCT 提取与原文逐字节一致且 CRC 通过");
+
+        int intact = 0;
+        (void)wm2_sentinel_check(img, hc, &intact);
+        check(intact == WM2_SENTINEL_COPIES, "16/16 份哨兵完好且 CRC 与头部一致");
+        bmp_free(img);
+    }
+
+    /* ---- 用例 9：动 1 个像素 → 内容仍可读，但哨兵崩（三态里的「可疑」）---- */
+    {
+        printf("[用例9] 动 1 个像素的最低位\n");
+        BmpImage *img = bmp_create(256, 256);
+        fill_test_image(img);
+
+        const char *text = "SENTINEL";
+        size_t      tlen = strlen(text);
+        wm2_embed(img, (const uint8_t *)text, tlen, 0);
+
+        uint8_t  out[64];
+        size_t   got = 0;
+        uint16_t hc  = 0;
+        wm2_extract(img, out, sizeof(out), &got, &hc, 0);
+
+        img->pixels[0] ^= 1u;                     /* 只翻一个最低位 */
+
+        int intact = 0;
+        (void)wm2_sentinel_check(img, hc, &intact);
+        check(intact < WM2_SENTINEL_COPIES, "哨兵份数下降到 15/16 → 能报出「像素被动过」");
+        bmp_free(img);
+    }
+
+    /* ---- 用例 10：大面积涂改 → CRC 失败（三态里的「假」）---- */
+    {
+        printf("[用例10] 涂掉 40%% 画面\n");
+        BmpImage *img = bmp_create(512, 512);
+        fill_test_image(img);
+
+        uint8_t msg[60];
+        fill_payload(msg, sizeof(msg), 3);
+        wm2_embed(img, msg, sizeof(msg), 0);
+
+        whiten_rect(img, 0, 0, 320, 240);
+
+        uint8_t  out[128];
+        size_t   got = 0;
+        uint16_t hc  = 0;
+        check(wm2_extract(img, out, sizeof(out), &got, &hc, 0) == WM2_ERR_CRC,
+              "CRC 失败 → 判定「已被篡改」");
+        bmp_free(img);
+    }
     printf("=== 结果: %s（失败 %d 项）===\n", g_fail == 0 ? "全部通过" : "存在失败", g_fail);
     return g_fail == 0 ? 0 : 1;
 }
@@ -659,6 +866,7 @@ int main(int argc, char **argv)
     const char *cmd = argv[1];
     if (!strcmp(cmd, "embed"))    return cmd_embed(argc, argv);
     if (!strcmp(cmd, "extract"))  return cmd_extract(argc, argv);
+    if (!strcmp(cmd, "verify"))   return cmd_verify(argc, argv);
     if (!strcmp(cmd, "info"))     return cmd_info(argc, argv);
     if (!strcmp(cmd, "diff"))     return cmd_diff(argc, argv);
     if (!strcmp(cmd, "tamper"))   return cmd_tamper(argc, argv);
