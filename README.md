@@ -426,6 +426,77 @@ powershell -File run_m3_acceptance.ps1   :: 18 项 M3 验收
 2. JPEG q30 以下失效。
 3. 单条消息上限 54 字节——抗裁剪的代价。
 4. CRC 不抗主动伪造（M4 加密钥/HMAC）。
+---
+
+## 3.8 M4：库封装 + 密钥防伪（交付层）
+
+### 一句话
+
+M1~M3 是"我自己会用的工具"；M4 把它变成**别人能调用的库**，并补上最后一个洞：**没有密钥就伪造不出来**。
+
+### 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `wm.h` | **公开 API**：只有 5 个函数 + 2 个结果结构体，不暴露任何内部实现 |
+| `wm_api.c` | API 实现：把 LSB / DCT / Tile 三套方法收进一个门面，自动识别方法 |
+| `crypto.c/h` | **纯 C 的 SHA-256 + HMAC-SHA256**（不依赖 OpenSSL），已用 FIPS/RFC 标准向量验证 |
+| `libwm.a` | 静态库，`gcc app.c -L. -lwm -lm` 即可链接 |
+| `wm_demo.c` | 只 include `wm.h` 的示例程序（能编过就证明"不用读实现也能用"） |
+| `run_m4_acceptance.ps1` | 10 项验收 |
+
+### 三行调用
+
+```c
+#include "wm.h"
+WmEmbedOptions opt = { WM_METHOD_TILE, "my-key", 6 };
+unsigned char *out; size_t out_len;
+wm_embed_bmp(bmp, bmp_len, (const unsigned char*)"hello", 5, &opt, &out, &out_len);
+```
+
+### 密钥标签怎么加（不改水印格式）
+
+```
+载荷 = "WMK1"(4) + tag(4) + 原文
+tag  = HMAC-SHA256(口令, 原文) 前 4 字节
+```
+
+- 有口令 → 重算 tag 比对，不一致就是 **BAD_KEY**（伪造/篡改）
+- 没口令 → **NEED_KEY**，拒绝在不知道密钥的情况下下结论
+- 为什么放载荷里而不是改三个模块的水印头：改动面小、风险低，而且"密钥"本来就属于**格式之外的一层封装**，将来换 Ed25519 签名只动这一层。
+
+### 实测：四种口令场景
+
+| 场景 | 结果 | 退出码 |
+|---|---|---|
+| 正确口令 | 成功，密钥标签验证通过 | 0 |
+| 错误口令 | **拒绝**（口令不正确：密钥标签验证失败） | 1 |
+| 不给口令 | **拒绝**（需要提供口令） | 1 |
+| 涂改后 + 正确口令 | **校验失败**（内容不一致） | 1 |
+
+密码学自检（标准向量，全部对上）：
+
+```
+[PASS] SHA-256("abc")                    FIPS 180-4
+[PASS] HMAC-SHA256(RFC 4231 #1)
+[PASS] HMAC-SHA256(RFC 4231 #2)
+```
+
+### 诚实的局限
+
+- 标签截断到 **32 bit**（4 字节）：随机伪造成功率约 1/43 亿，比赛够用；生产环境应保留 128 bit。
+- Tile 模式加口令后正文上限从 54 降到 **46 字节**（8 字节封装开销）。
+- CRC 仍在用：它负责"防损坏"，HMAC 负责"防伪造"，两者职责不同，都在跑。
+
+### 怎么跑
+
+```bat
+build.bat                                :: 产出 wm.exe / wm_server.exe / libwm.a / wm_demo.exe
+wm_demo.exe --crypto-test                :: 密码学自检
+wm_demo.exe embed  in.bmp out.bmp msg.txt 口令 dct
+wm_demo.exe verify out.bmp 口令
+powershell -File run_m4_acceptance.ps1   :: 10 项验收
+```
 ## 4. 设计原理（答辩就讲这五段）
 
 ### 4.1 为什么 LSB 是"辅助"而不是"主力"
@@ -564,7 +635,7 @@ extract : 0.0150 ms/次  → 约 66666 次/秒
 - **M1（本次）**：LSB 闭环 ✅
 - **M2**：CRC16 + 分块 DCT 中频嵌入，`wm verify` 给出"真/假"，LSB 作为篡改哨兵
 - **M3**：抗 JPEG(q50~q90)/裁剪（分块冗余）、RS 纠错、性能与容量数据表
-- **M4**：封装 `wm_embed()` / `wm_extract()` 库 + `libwm.h`，导出 DLL/静态库，交付 demo
+- **M4（本次）**：`wm.h` 公开 API + `libwm.a` + 纯 C HMAC 密钥防伪 + 示例程序 ✅
 
 ---
 

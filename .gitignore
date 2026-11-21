@@ -97,4 +97,12 @@ got3.txt
 msg_m3.txtt3.bmp
 t3_tamp.bmp
 t3_heat.bmp
-msg_m2.txt
+msg_m2.txt*.o
+libwm.a
+k_wm.bmp
+k_tamp.bmp
+plain_wm.bmp
+lib_wm.bmp
+lib_tamp.bmp
+msg_m4.txt
+big.bmp
