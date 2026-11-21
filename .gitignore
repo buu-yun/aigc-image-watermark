@@ -106,3 +106,9 @@ lib_wm.bmp
 lib_tamp.bmp
 msg_m4.txt
 big.bmp
+# ---- 打包产物与临时脚本 ----
+dist/
+aigc-watermark-*.zip
+_zt/
+_dbg.ps1
+_*.ps1
