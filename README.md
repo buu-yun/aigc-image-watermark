@@ -8,7 +8,7 @@
 
 ### 👉 在线试用（免安装、免注册、图片不上传）：**https://buu-yun.github.io/aigc-image-watermark/**
 
-> 那个页面里跑的不是 JS 复刻，而是把 `bmp.c` / `lsb.c` 用 clang 编成的 **7 KB WebAssembly** —— 同一份 C 源码，跑在你浏览器里。
+> 那个页面里跑的不是 JS 复刻，而是把 **全部 C 源码（LSB + DCT + Tile + HMAC）** 用 zig cc 编成的 **51.5 KB WebAssembly** —— 同一份 C 源码，跑在你浏览器里；网页上可选方法、可填口令。
 
 > 目标：**能藏能取** —— 手写 24 位 BMP 读写 + LSB 隐写，跑通最小闭环。
 > 约束：纯 C99 + 标准库，Windows + gcc，无第三方依赖。

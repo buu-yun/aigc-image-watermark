@@ -1,17 +1,19 @@
 /*
- * wm_glue.c —— 把 C 引擎包成浏览器可调用的 WebAssembly 接口
+ * wm_glue.c —— 把整库（LSB + DCT + Tile + HMAC）包成 WebAssembly 接口
  *
- * 设计要点：
- *   1) 不传指针、不用回调：JS 先通过 wm_in_ptr() 拿到一块固定内存，
- *      把「BMP 字节 + 文本字节」写进去，再调用函数 —— 这是 wasm 最省事的传参方式。
- *   2) 输入区 g_in 的布局：[0, bmp_len) 是 BMP，[bmp_len, bmp_len+text_len) 是 UTF-8 文本。
- *   3) 返回值：>=0 表示输出字节数；<0 是错误码（LSB 的错误码原样透传）。
+ * 与 M1 版的区别：不再只导出 LSB，而是直接转发到 wm.h 的公开 API，
+ * 所以网页上能选方法、能填口令 —— 浏览器里跑的就是和 CLI 一模一样的引擎。
  *
- * 编译：
- *   zig cc -target wasm32-wasi -mexec-model=reactor -O2 \
- *          -Wl,--export=wm_in_ptr -Wl,--export=wm_out_ptr -Wl,--export=wm_in_cap \
- *          -Wl,--export=wm_embed -Wl,--export=wm_extract -Wl,--export=wm_capacity \
- *          -o wm.wasm bmp.c lsb.c wm_glue.c
+ * 输入布局（都在 g_in 里，靠长度参数切分）：
+ *   g_in = [BMP][消息][口令]
+ *
+ * 导出：
+ *   wm_in_ptr() / wm_out_ptr() / wm_in_cap()
+ *   wm_capacity_any(bmp_len, method)                  -> 容量字节数
+ *   wm_embed_any(bmp_len, msg_len, method, key_len)   -> 输出字节数 / 负错误码
+ *   wm_extract_any(bmp_len, key_len)                  -> 消息字节数 / 负错误码
+ *   wm_last_flags()  bit0=带密钥 bit1=密钥通过 bit2=CRC通过
+ *   wm_last_method() 0=LSB 1=DCT 2=Tile
  */
 #include <stdint.h>
 #include <stddef.h>
@@ -21,106 +23,100 @@
 
 #include "bmp.h"
 #include "lsb.h"
+#include "dctwm.h"
+#include "tilewm.h"
+#include "wm.h"
 
-/*
- * wasm 里没有控制台，日志全部丢弃。
- * 额外好处：编译时用 -Dprintf=wm_noop_printf -Dfprintf=wm_noop_fprintf 替换掉，
- * 就不会把 wasi-libc 整套格式化输出拖进去，wasm 体积能小一个数量级。
- */
-int wm_noop_printf(const char *fmt, ...)
-{
-    (void)fmt;
-    return 0;
-}
+/* wasm 里没有控制台：把日志换成空函数，避免把整套 printf 拖进来（体积 1MB -> 7KB） */
+int wm_noop_printf(const char *fmt, ...) { (void)fmt; return 0; }
+int wm_noop_fprintf(FILE *f, const char *fmt, ...) { (void)f; (void)fmt; return 0; }
 
-int wm_noop_fprintf(FILE *f, const char *fmt, ...)
-{
-    (void)f;
-    (void)fmt;
-    return 0;
-}
-
-/* 输入/输出各 16 MB：够放 2300x2300 的 24 位 BMP，浏览器里也吃得消 */
 #define IN_CAP  (16u * 1024u * 1024u)
-#define OUT_CAP (16u * 1024u * 1024u)
-
-/* 胶水层自己的错误码，避开 LSB 的 -1..-4 */
-#define WM_E_ARGS   (-100)
-#define WM_E_BMP    (-101)
-#define WM_E_SAVE   (-102)
-#define WM_E_TOOBIG (-103)
 
 static uint8_t g_in[IN_CAP];
-static uint8_t g_out[OUT_CAP];
+static uint8_t g_out[IN_CAP];
 
-/* ---- 导出给 JS 的入口 ---- */
+static int g_flags  = 0;
+static int g_method = -1;
+static int g_msglen = 0;
 
 __attribute__((export_name("wm_in_ptr")))  uint8_t *wm_in_ptr(void)  { return g_in; }
 __attribute__((export_name("wm_out_ptr"))) uint8_t *wm_out_ptr(void) { return g_out; }
 __attribute__((export_name("wm_in_cap")))  int      wm_in_cap(void)  { return (int)IN_CAP; }
 
-/* 嵌入：输入 g_in = [BMP][文本]，输出 g_out = 带水印的新 BMP；返回输出字节数 */
-__attribute__((export_name("wm_embed")))
-int wm_embed(int bmp_len, int text_len)
+__attribute__((export_name("wm_last_flags")))  int wm_last_flags(void)  { return g_flags; }
+__attribute__((export_name("wm_last_method"))) int wm_last_method(void) { return g_method; }
+__attribute__((export_name("wm_last_msglen"))) int wm_last_msglen(void) { return g_msglen; }
+
+/* 容量查询：先让调用方把 BMP 写进 g_in */
+__attribute__((export_name("wm_capacity_any")))
+int wm_capacity_any(int bmp_len, int method)
 {
-    if (bmp_len <= 0 || text_len <= 0) return WM_E_ARGS;
-    if ((int64_t)bmp_len + (int64_t)text_len > (int64_t)IN_CAP) return WM_E_TOOBIG;
-
+    if (bmp_len <= 0 || bmp_len > (int)IN_CAP) return -100;
     BmpImage *img = bmp_load_mem(g_in, (size_t)bmp_len);
-    if (!img) return WM_E_BMP;
+    if (!img) return -101;
 
-    LsbStatus st = lsb_embed(img, g_in + bmp_len, (size_t)text_len, 0);
-    if (st != LSB_OK) {
-        bmp_free(img);
-        return (int)st;                 /* -2 容量不足 等，JS 直接翻译成中文 */
-    }
+    int cap = 0;
+    if (method == 0)      cap = (int)lsb_capacity_bytes(img);
+    else if (method == 1) cap = (int)wm2_capacity_bytes(img);
+    else                  cap = (int)wm3_max_payload();
 
-    uint8_t *out  = NULL;
-    size_t   olen = 0;
-    int rc = bmp_save_mem(img, &out, &olen);
     bmp_free(img);
-    if (rc != 0) return WM_E_SAVE;
-    if (olen > (size_t)OUT_CAP) {
-        free(out);
-        return WM_E_TOOBIG;
-    }
+    return cap;
+}
 
+/* 嵌入：g_in = [BMP][消息][口令] */
+__attribute__((export_name("wm_embed_any")))
+int wm_embed_any(int bmp_len, int msg_len, int method, int key_len)
+{
+    if (bmp_len <= 0 || msg_len <= 0 || key_len < 0) return WM_ERR_ARG;
+    if ((long)bmp_len + msg_len + key_len > (long)IN_CAP) return -100;
+
+    const unsigned char *msg = g_in + bmp_len;
+    const char          *key = (key_len > 0) ? (const char *)(g_in + bmp_len + msg_len) : NULL;
+
+    WmEmbedOptions opt;
+    opt.method  = (method == 0) ? WM_METHOD_LSB : (method == 1) ? WM_METHOD_DCT : WM_METHOD_TILE;
+    opt.key     = key;
+    opt.key_len = (size_t)key_len;
+
+    unsigned char *out = NULL;
+    size_t         olen = 0;
+    WmStatus st = wm_embed_bmp(g_in, (size_t)bmp_len, msg, (size_t)msg_len, &opt, &out, &olen);
+    if (st != WM_OK) return (int)st;
+
+    if (olen > (size_t)IN_CAP) { wm_free(out); return -100; }
     memcpy(g_out, out, olen);
-    free(out);
+    wm_free(out);
     return (int)olen;
 }
 
-/* 提取：输入 g_in = [BMP]，输出 g_out = 文本；返回文本字节数 */
-__attribute__((export_name("wm_extract")))
-int wm_extract(int bmp_len)
+/* 提取/验证：g_in = [BMP][口令] */
+__attribute__((export_name("wm_extract_any")))
+int wm_extract_any(int bmp_len, int key_len)
 {
-    if (bmp_len <= 0 || bmp_len > (int)IN_CAP) return WM_E_ARGS;
+    if (bmp_len <= 0 || key_len < 0) return WM_ERR_ARG;
+    if ((long)bmp_len + key_len > (long)IN_CAP) return -100;
 
-    BmpImage *img = bmp_load_mem(g_in, (size_t)bmp_len);
-    if (!img) return WM_E_BMP;
+    const char *key = (key_len > 0) ? (const char *)(g_in + bmp_len) : NULL;
 
-    size_t cap = lsb_capacity_bytes(img);
-    if (cap + 2u > (size_t)OUT_CAP) {
-        bmp_free(img);
-        return WM_E_TOOBIG;
+    char         *msg = NULL;
+    size_t        mlen = 0;
+    WmVerifyInfo  info;
+    memset(&info, 0, sizeof(info));
+
+    WmStatus st = wm_extract_bmp(g_in, (size_t)bmp_len, key, (size_t)key_len, &msg, &mlen, &info);
+
+    g_flags  = (info.keyed ? 1 : 0) | (info.authenticated ? 2 : 0) | (info.crc_ok ? 4 : 0);
+    g_method = (int)info.method;
+    g_msglen = (int)mlen;
+
+    if (msg && mlen > 0 && mlen < (size_t)IN_CAP && (st == WM_OK || st == WM_ERR_TAMPERED)) {
+        memcpy(g_out, msg, mlen);
+        g_out[mlen] = 0;
     }
+    wm_free(msg);
 
-    size_t    len = 0;
-    LsbStatus st  = lsb_extract(img, g_out, cap + 1u, &len, 0);
-    bmp_free(img);
-
-    if (st != LSB_OK) return (int)st;   /* -3 无水印 / -4 头部损坏 */
-    return (int)len;
-}
-
-/* 容量查询：JS 在用户选完图后用它显示"还能藏多少字" */
-__attribute__((export_name("wm_capacity")))
-int wm_capacity(int bmp_len)
-{
-    if (bmp_len <= 0 || bmp_len > (int)IN_CAP) return WM_E_ARGS;
-    BmpImage *img = bmp_load_mem(g_in, (size_t)bmp_len);
-    if (!img) return WM_E_BMP;
-    int c = (int)lsb_capacity_bytes(img);
-    bmp_free(img);
-    return c;
+    if (st != WM_OK) return (int)st;
+    return (int)mlen;
 }

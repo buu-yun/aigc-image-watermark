@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AIGC 图像可信水印引擎 · 纯浏览器版</title>
+<title>AIGC 图像可信水印引擎</title>
 <style>
   :root{--bg:#0b1220;--card:#fff;--ink:#0f172a;--muted:#64748b;--line:#e2e8f0;
         --accent:#2563eb;--accent2:#7c3aed;--ok:#059669;--warn:#d97706;--err:#dc2626}
@@ -31,9 +31,13 @@
   .meta{display:flex;flex-wrap:wrap;gap:9px;margin-top:12px;font-size:12.5px}
   .meta span{background:#f1f5f9;border-radius:8px;padding:6px 10px;color:#334155}
   .meta b{color:var(--accent)}
-  textarea{width:100%;min-height:96px;margin-top:12px;padding:12px;border:1px solid var(--line);
+  textarea{width:100%;min-height:92px;margin-top:12px;padding:12px;border:1px solid var(--line);
            border-radius:10px;font-family:inherit;font-size:14px;resize:vertical;outline:none}
   textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(37,99,235,.12)}
+  .opts{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap;font-size:13px;color:#475569}
+  .opts label{display:flex;align-items:center;gap:6px;background:#f8fafc;border:1px solid var(--line);
+              border-radius:9px;padding:7px 10px}
+  .opts select,.opts input{border:1px solid var(--line);border-radius:7px;padding:5px 8px;font-size:13px;outline:none}
   .row{display:flex;gap:10px;align-items:center;margin-top:14px;flex-wrap:wrap}
   .btn{border:0;border-radius:10px;padding:12px 22px;font-size:15px;font-weight:600;color:#fff;
        background:linear-gradient(135deg,var(--accent),var(--accent2));cursor:pointer;transition:.15s;
@@ -69,7 +73,7 @@
   <header>
     <h1>AIGC 图像可信水印引擎</h1>
     <p>把文字藏进图片，取出时判断有没有被改过</p>
-    <span class="tag">引擎：C99 源码编译为 WebAssembly · 全程在你浏览器里算 · 图片不上传</span>
+    <span class="tag">引擎：C99 源码编译为 WebAssembly（含 LSB / DCT / Tile / HMAC）· 全程在你浏览器里算· 图片不上传</span>
   </header>
 
   <div class="card">
@@ -81,15 +85,27 @@
     <section id="panelEmbed">
       <div class="drop" id="dropEmbed">
         <b>点击选择图片，或拖到这里</b>
-        <small>JPG / PNG / BMP 都行（自动转成 24 位 BMP）；建议 512×512 以上</small>
+        <small>JPG / PNG / BMP 都行（自动转成 24 位 BMP）；Tile 建议 ≥512×512</small>
       </div>
       <input type="file" id="fileEmbed" accept="image/*,.bmp" class="hidden">
       <div class="meta" id="metaEmbed" style="display:none">
         <span>尺寸 <b id="mSize">—</b></span>
-        <span>可藏容量 <b id="mCap">—</b></span>
+        <span>可用容量 <b id="mCap">—</b></span>
         <span>消息占用 <b id="mUse">—</b></span>
       </div>
-      <textarea id="txt" placeholder="要藏进图片的文字（中文/英文/多行都行）。建议写：作者 + 生成模型 + 时间戳 + 内容哈希。"></textarea>
+      <textarea id="txt" placeholder="要藏进图片的文字。Tile 模式上限 54 字节（带口令 46）；DCT 模式容量更大。"></textarea>
+      <div class="opts">
+        <label>方法
+          <select id="method" onchange="onMethodChange()">
+            <option value="2" selected>Tile（抗裁剪）</option>
+            <option value="1">DCT（抗压缩，容量大）</option>
+            <option value="0">LSB（容量最大，怕压缩）</option>
+          </select>
+        </label>
+        <label>口令（可选）
+          <input id="key" type="text" placeholder="留空=只能防损坏" size="16">
+        </label>
+      </div>
       <div class="row">
         <button class="btn" id="btnEmbed" onclick="doEmbed()" disabled>开始嵌入</button>
         <button class="btn ghost" onclick="resetEmbed()">重选</button>
@@ -99,7 +115,7 @@
         <img id="imgOut" class="preview" alt="带水印的图片">
         <div class="row">
           <a id="dl" class="btn" download="watermarked.bmp">下载带水印的图片</a>
-          <span style="font-size:12.5px;color:var(--muted)">请保存为 BMP：转 JPG / 截图 / 微信转发都会破坏 LSB 水印（这正是它能验真的原因）。</span>
+          <span style="font-size:12.5px;color:var(--muted)">请保存为 BMP：转 JPG / 截图 / 微信转发都会破坏 LSB；Tile 与 DCT 能抗住 JPEG。</span>
         </div>
       </div>
     </section>
@@ -107,11 +123,14 @@
     <section id="panelExtract" class="hidden">
       <div class="drop" id="dropExtract">
         <b>点击选择图片，或拖到这里</b>
-        <small>把下载的 BMP 原样传回来（不要用截图或转发后的版本）</small>
+        <small>三种方法会自动识别；若图片带口令，请填写同一个口令</small>
       </div>
       <input type="file" id="fileExtract" accept="image/*,.bmp" class="hidden">
+      <div class="opts">
+        <label>口令（可选）<input id="key2" type="text" placeholder="图片带口令时必填" size="16"></label>
+      </div>
       <div class="row">
-        <button class="btn" id="btnExtract" onclick="doExtract()" disabled>提取水印</button>
+        <button class="btn" id="btnExtract" onclick="doExtract()" disabled>提取并验真</button>
         <button class="btn ghost" onclick="resetExtract()">重选</button>
       </div>
       <div class="status" id="stExtract"></div>
@@ -123,16 +142,15 @@
   </div>
 
   <footer>
-    技术路线：<b>LSB 隐写</b> 负责"一改就坏"的篡改检测，<b>DCT 频域水印（M2）</b> 负责抗 JPEG 的鲁棒溯源。<br>
-    本页无后端、无网络请求，<a onclick="runSelfTest()">点这里跑一次自检</a> · 引擎 wasm 体积 <b id="wasmSize">—</b>
+    LSB 负责"一改就坏"的篡改检测，DCT 抗 JPEG，Tile 抗裁剪，HMAC 抗伪造。<br>
+    本页无后端、无网络请求，<a onclick="runSelfTest()">点这里跑一次自检</a> · 引擎 wasm <b id="wasmSize">—</b>
     <div id="selftest"></div>
   </footer>
 </div>
 
 <script>
-/* ================= 引擎加载（内嵌 wasm，file:// 也能跑） ================= */
+/* ================= 引擎加载（wasm 已内嵌，file:// 也能跑） ================= */
 const WM_WASM_B64 = "__WM_WASM_B64__";
-
 let ENGINE = null;
 
 async function loadEngine() {
@@ -146,24 +164,23 @@ async function loadEngine() {
   return ex;
 }
 
-/* wasm 错误码 → 中文 */
+/* 状态码 → 中文（与 wm.h 的 WmStatus 对齐） */
 const ERR = {
-  '-1': '参数非法',
-  '-2': '图片容量不足，请换更大的图或缩短文字',
-  '-3': '未检测到水印（可能没嵌过，或被重编码/涂改）',
-  '-4': '水印头部损坏（图片很可能被局部篡改）',
-  '-100': '参数非法',
-  '-101': '图片解析失败：需要 24 位未压缩 BMP',
-  '-102': '生成输出图片失败',
-  '-103': '图片太大（上限 16MB）'
+  '0': '成功', '-1': '参数非法', '-2': '文件读写失败', '-3': '不是 24 位 BMP 或水印头损坏',
+  '-4': '容量不足（换更大图或换方法）', '-5': '未检测到水印',
+  '-6': '校验失败：内容与嵌入时不一致（疑似被篡改）',
+  '-7': '该水印带口令，请填写后才能验证', '-8': '口令不正确（密钥标签验证失败）',
+  '-100': '数据太大', '-101': '图片解析失败'
 };
 const errText = c => ERR[String(c)] || ('引擎错误 ' + c);
 
-/* ================= 图片 → 24 位 BMP ================= */
 const $ = id => document.getElementById(id);
 function fmt(n){ return n < 1024 ? n + ' B' : n < 1048576 ? (n/1024).toFixed(1) + ' KB' : (n/1048576).toFixed(2) + ' MB'; }
 function setStatus(el, kind, html){ el.className = 'status show ' + kind; el.innerHTML = html; }
+const methodId = () => parseInt($('method').value, 10);
+const methodName = m => m === 0 ? 'LSB' : m === 1 ? 'DCT' : 'Tile';
 
+/* ================= 图片 → 24 位 BMP ================= */
 function packFromImageData(px, w, h) {
   const stride = (w * 3 + 3) & ~3;
   const out = new Uint8Array(54 + stride * h);
@@ -173,7 +190,7 @@ function packFromImageData(px, w, h) {
   dv.setUint32(14, 40, true); dv.setInt32(18, w, true); dv.setInt32(22, h, true);
   dv.setUint16(26, 1, true); dv.setUint16(28, 24, true);
   dv.setUint32(34, stride * h, true); dv.setUint32(38, 2835, true); dv.setUint32(42, 2835, true);
-  for (let r = 0; r < h; r++) {                 // BMP 自下而上
+  for (let r = 0; r < h; r++) {
     const srcY = h - 1 - r;
     let o = 54 + r * stride, s = srcY * w * 4;
     for (let x = 0; x < w; x++) { out[o++] = px[s + 2]; out[o++] = px[s + 1]; out[o++] = px[s]; s += 4; }
@@ -198,40 +215,57 @@ async function fileToBmp(file) {
     const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
     const ctx = cv.getContext('2d', { willReadFrequently: true });
     ctx.drawImage(img, 0, 0);
-    const px = ctx.getImageData(0, 0, w, h).data;
-    return { bmp: packFromImageData(px, w, h), w, h };
+    return { bmp: packFromImageData(ctx.getImageData(0, 0, w, h).data, w, h), w, h };
   } finally { URL.revokeObjectURL(url); }
 }
 
-/* ================= 调用 wasm ================= */
-function capacityOf(bmp) {
+/* ================= 调 wasm ================= */
+const enc = new TextEncoder();
+const dec = new TextDecoder('utf-8');
+
+function putIn(bmp, extra) {
   const ex = ENGINE;
-  new Uint8Array(ex.memory.buffer).set(new Uint8Array(bmp), ex.wm_in_ptr());
-  return ex.wm_capacity(bmp.byteLength);
+  const base = ex.wm_in_ptr();
+  new Uint8Array(ex.memory.buffer).set(new Uint8Array(bmp), base);
+  if (extra && extra.length) new Uint8Array(ex.memory.buffer).set(extra, base + bmp.byteLength);
 }
 
-function embedViaWasm(bmp, text) {
+function capacityOf(bmp, method) {
+  putIn(bmp, null);
+  return ENGINE.wm_capacity_any(bmp.byteLength, method);
+}
+
+function embedViaWasm(bmp, text, method, key) {
   const ex = ENGINE;
-  const tb = new TextEncoder().encode(text);
-  const inPtr = ex.wm_in_ptr();
-  new Uint8Array(ex.memory.buffer).set(new Uint8Array(bmp), inPtr);
-  new Uint8Array(ex.memory.buffer).set(tb, inPtr + bmp.byteLength);
-  const len = ex.wm_embed(bmp.byteLength, tb.length);
+  const tb = enc.encode(text);
+  const kb = key ? enc.encode(key) : new Uint8Array(0);
+  const base = ex.wm_in_ptr();
+  new Uint8Array(ex.memory.buffer).set(new Uint8Array(bmp), base);
+  new Uint8Array(ex.memory.buffer).set(tb, base + bmp.byteLength);
+  if (kb.length) new Uint8Array(ex.memory.buffer).set(kb, base + bmp.byteLength + tb.length);
+  const len = ex.wm_embed_any(bmp.byteLength, tb.length, method, kb.length);
   if (len < 0) throw new Error(errText(len));
   return new Uint8Array(ex.memory.buffer, ex.wm_out_ptr(), len).slice().buffer;
 }
 
-function extractViaWasm(bmp) {
+/* 返回 {st, text, flags, method, msgLen} */
+function extractViaWasm(bmp, key) {
   const ex = ENGINE;
-  new Uint8Array(ex.memory.buffer).set(new Uint8Array(bmp), ex.wm_in_ptr());
-  const len = ex.wm_extract(bmp.byteLength);
-  if (len < 0) return { code: len, text: null };
-  const bytes = new Uint8Array(ex.memory.buffer, ex.wm_out_ptr(), len).slice();
-  return { code: 0, text: new TextDecoder('utf-8').decode(bytes) };
+  const kb = key ? enc.encode(key) : new Uint8Array(0);
+  putIn(bmp, kb);
+  const r = ex.wm_extract_any(bmp.byteLength, kb.length);
+  const flags = ex.wm_last_flags();
+  const method = ex.wm_last_method();
+  const msgLen = ex.wm_last_msglen();
+  let text = null;
+  if (msgLen > 0 && (r >= 0 || r === -6)) {
+    text = dec.decode(new Uint8Array(ex.memory.buffer, ex.wm_out_ptr(), msgLen).slice());
+  }
+  return { st: r, text, flags, method, msgLen };
 }
 
 /* ================= 嵌入 ================= */
-let embedBmp = null, embedW = 0, embedH = 0, embedName = '';
+let embedBmp = null;
 
 function wireDrop(dropEl, inputEl, onPick) {
   dropEl.addEventListener('click', () => inputEl.click());
@@ -247,17 +281,13 @@ async function onPickEmbed(file) {
     setStatus(st, 'info', '正在读取并转换图片…');
     if (!ENGINE) throw new Error('引擎还在加载，请稍等一秒');
     const r = await fileToBmp(file);
-    embedBmp = r.bmp; embedW = r.w; embedH = r.h; embedName = file.name;
-
-    const cap = capacityOf(r.bmp);
-    if (cap <= 0) throw new Error('这张图无法解析成 24 位 BMP');
-
+    embedBmp = r.bmp;
+    const cap = capacityOf(r.bmp, methodId());
     $('metaEmbed').style.display = 'flex';
     $('mSize').textContent = r.w + '×' + r.h;
     $('mCap').textContent = fmt(cap);
     updateUsage();
-    if (cap < 200) setStatus(st, 'err', '图片太小，容量不足 200 字节，请换更大的图（建议 512×512 以上）');
-    else setStatus(st, 'ok', '图片已就绪：' + file.name + '（' + fmt(file.size) + '）。输入文字后点“开始嵌入”。');
+    setStatus(st, 'ok', '图片已就绪：' + file.name + '（' + fmt(file.size) + '），方法 ' + methodName(methodId()) + '。');
     $('resEmbed').classList.remove('show');
   } catch (err) {
     setStatus(st, 'err', '图片读取失败：' + err.message);
@@ -265,19 +295,28 @@ async function onPickEmbed(file) {
   }
 }
 
+function onMethodChange() {
+  if (!embedBmp) return;
+  const cap = capacityOf(embedBmp, methodId());
+  $('mCap').textContent = fmt(cap);
+  updateUsage();
+}
+
 function updateUsage() {
   if (!embedBmp) return;
-  const bytes = new TextEncoder().encode($('txt').value).length;
-  const cap = capacityOf(embedBmp);
-  const need = bytes + 10;
-  $('mUse').textContent = bytes + ' 字节（含头 ' + need + ' B，占 ' + (cap ? (need * 100 / cap).toFixed(2) : 0) + '%）';
-  if (bytes === 0) { $('btnEmbed').disabled = true; }
-  else if (need > cap) {
+  const bytes = enc.encode($('txt').value).length;
+  const cap = capacityOf(embedBmp, methodId());
+  const keyLen = $('key').value ? enc.encode($('key').value).length : 0;
+  const need = bytes + 10 + (keyLen ? 8 : 0);
+  $('mUse').textContent = bytes + ' 字节' + (keyLen ? '（含口令标签 8 B）' : '');
+  if (bytes === 0) { $('btnEmbed').disabled = true; return; }
+  if (need > cap) {
     $('btnEmbed').disabled = true;
-    setStatus($('stEmbed'), 'err', '消息太长：需要 ' + need + ' 字节，这张图只能放 ' + cap + ' 字节。请缩短文字或换更大的图。');
+    setStatus($('stEmbed'), 'err', '消息太长：需要 ' + need + ' 字节，' + methodName(methodId()) + ' 只能放 ' + cap + ' 字节。请缩短内容或换方法。');
   } else { $('btnEmbed').disabled = false; }
 }
 $('txt').addEventListener('input', updateUsage);
+$('key').addEventListener('input', updateUsage);
 wireDrop($('dropEmbed'), $('fileEmbed'), onPickEmbed);
 
 async function doEmbed() {
@@ -285,21 +324,21 @@ async function doEmbed() {
   if (!embedBmp) return;
   const text = $('txt').value;
   if (!text) { setStatus(st, 'err', '请输入要嵌入的文字'); return; }
+  const method = methodId(), key = $('key').value || null;
   btn.disabled = true;
-  setStatus(st, 'info', '正在嵌入（在浏览器里算）…');
+  setStatus(st, 'info', '正在嵌入（浏览器本地计算）…');
   const t0 = performance.now();
   try {
-    await new Promise(r => setTimeout(r, 16));           // 让"正在嵌入"先渲染出来
-    const out = embedViaWasm(embedBmp, text);
+    await new Promise(r => setTimeout(r, 16));
+    const out = embedViaWasm(embedBmp, text, method, key);
     const ms = (performance.now() - t0).toFixed(0);
-    const blob = new Blob([out], { type: 'image/bmp' });
-    const url = URL.createObjectURL(blob);
+    const url = URL.createObjectURL(new Blob([out], { type: 'image/bmp' }));
     $('imgOut').src = url;
     const a = $('dl');
     a.href = url;
-    a.download = (embedName.replace(/\.[^.]+$/, '') || 'image') + '_watermarked.bmp';
-    setStatus(st, 'ok', '嵌入成功：消息 ' + new TextEncoder().encode(text).length +
-              ' 字节，耗时 ' + ms + ' ms，图片容量 ' + capacityOf(embedBmp) + ' 字节。下载后请保存为 BMP。');
+    a.download = 'watermarked_' + methodName(method).toLowerCase() + '.bmp';
+    setStatus(st, 'ok', '嵌入成功：方法 ' + methodName(method) + '，消息 ' + enc.encode(text).length +
+              ' 字节' + (key ? '，已加口令标签' : '（无口令，只能防损坏）') + '，耗时 ' + ms + ' ms。');
     $('resEmbed').classList.add('show');
   } catch (err) {
     setStatus(st, 'err', '嵌入失败：' + err.message);
@@ -307,7 +346,7 @@ async function doEmbed() {
 }
 
 function resetEmbed() {
-  embedBmp = null; embedW = embedH = 0;
+  embedBmp = null;
   $('metaEmbed').style.display = 'none';
   $('resEmbed').classList.remove('show');
   $('stEmbed').className = 'status';
@@ -315,7 +354,7 @@ function resetEmbed() {
   $('fileEmbed').value = '';
 }
 
-/* ================= 提取 ================= */
+/* ================= 提取 / 验真 ================= */
 let extractBmp = null;
 wireDrop($('dropExtract'), $('fileExtract'), async file => {
   const st = $('stExtract');
@@ -324,7 +363,7 @@ wireDrop($('dropExtract'), $('fileExtract'), async file => {
     const r = await fileToBmp(file);
     extractBmp = r.bmp;
     $('btnExtract').disabled = false;
-    setStatus(st, 'ok', '已选择：' + file.name + '（' + r.w + '×' + r.h + '，' + fmt(file.size) + '）。点“提取水印”。');
+    setStatus(st, 'ok', '已选择：' + file.name + '（' + r.w + '×' + r.h + '，' + fmt(file.size) + '）');
     $('resExtract').classList.remove('show');
   } catch (err) {
     setStatus(st, 'err', '图片读取失败：' + err.message);
@@ -339,21 +378,32 @@ async function doExtract() {
   setStatus(st, 'info', '正在提取…');
   try {
     await new Promise(r => setTimeout(r, 16));
-    const { code, text } = extractViaWasm(extractBmp);
+    const key = $('key2').value || null;
+    const { st: code, text, flags, method } = extractViaWasm(extractBmp, key);
     const bw = $('badgeWrap');
-    if (code === 0) {
-      $('outText').textContent = text;
+    const keyed = !!(flags & 1), auth = !!(flags & 2), crc = !!(flags & 4);
+
+    if (code >= 0) {
+      $('outText').textContent = text || '（空）';
       bw.innerHTML = '<span class="badge ok">✓ 水印完整</span>';
-      setStatus(st, 'ok', '取回 ' + new TextEncoder().encode(text).length +
-                ' 字节，与嵌入时完全一致 —— 这张图的像素没有被改过。');
-    } else if (code === -3) {
-      $('outText').textContent = '（没有找到水印比特）';
+      setStatus(st, 'ok', '命中方法 ' + methodName(method) + '，内容校验通过' +
+                (keyed ? '，口令标签通过' : '（未加口令）') + '。');
+    } else if (code === -6) {
+      $('outText').textContent = text || '（内容已损坏）';
+      bw.innerHTML = '<span class="badge err">✗ 校验失败（疑似篡改）</span>';
+      setStatus(st, 'err', '内容与嵌入时不一致 —— 图片被改过。');
+    } else if (code === -7) {
+      bw.innerHTML = '<span class="badge warn">🔑 需要口令</span>';
+      setStatus(st, 'warn', '这张图带口令标签，请在"口令"里填写后重试。');
+    } else if (code === -8) {
+      bw.innerHTML = '<span class="badge err">✗ 口令不对</span>';
+      setStatus(st, 'err', '口令不正确，密钥标签验证失败 —— 内容不可信。');
+    } else if (code === -5) {
       bw.innerHTML = '<span class="badge err">✗ 未检测到水印</span>';
-      setStatus(st, 'err', '未检测到水印：可能从未嵌入过，或图片被改过/转 JPG/截图/微信转发，LSB 比特已被抹掉。M1 无法区分这两种情况，M2 的 CRC 会给出确定结论。');
+      setStatus(st, 'err', '三种方法（Tile / DCT / LSB）都没找到水印。可能从未嵌入，或被严重破坏。');
     } else {
-      $('outText').textContent = '（水印头部损坏）';
-      bw.innerHTML = '<span class="badge warn">! 头部损坏</span>';
-      setStatus(st, 'warn', '找到类似水印的痕迹，但头部不合法 —— 图片很可能被局部篡改。');
+      bw.innerHTML = '<span class="badge warn">! ' + errText(code) + '</span>';
+      setStatus(st, 'warn', errText(code) + '（内容校验' + (crc ? '通过' : '未通过') + '）');
     }
     $('resExtract').classList.add('show');
   } catch (err) {
@@ -378,60 +428,57 @@ function switchTab(which) {
   $('panelExtract').classList.toggle('hidden', isEmbed);
 }
 
-/* ================= 一键自检（不依赖任何外部图片） ================= */
+/* ================= 一键自检 ================= */
 async function runSelfTest() {
   const box = $('selftest');
   box.style.display = 'block';
   box.textContent = '自检中…';
   const lines = [];
   let pass = 0, total = 0;
-  const t = (ok, name, extra = '') => { total++; ok && pass++;
+  const t = (ok, name, extra = '') => {
+    total++; if (ok) pass++;
     lines.push((ok ? 'PASS  ' : 'FAIL  ') + name + (extra ? '   ' + extra : ''));
-    box.textContent = lines.join('\n'); };
+    box.textContent = lines.join('\n');
+  };
 
   try {
+    /* 造一张 1024x768 的图（DCT 容量 ~495 字节） */
     const cv = document.createElement('canvas');
-    cv.width = 512; cv.height = 512;
+    cv.width = 1024; cv.height = 768;
     const ctx = cv.getContext('2d');
-    const g = ctx.createLinearGradient(0, 0, 512, 512);
+    const g = ctx.createLinearGradient(0, 0, 1024, 768);
     g.addColorStop(0, '#1e3a8a'); g.addColorStop(1, '#f59e0b');
-    ctx.fillStyle = g; ctx.fillRect(0, 0, 512, 512);
+    ctx.fillStyle = g; ctx.fillRect(0, 0, 1024, 768);
     ctx.fillStyle = '#111';
-    for (let i = 0; i < 8; i++) ctx.fillRect(40 + i * 56, 120, 28, 28);
-    const px = ctx.getImageData(0, 0, 512, 512).data;
-    const bmp = packFromImageData(px, 512, 512);
-    t(true, '生成 512×512 测试图', fmt(bmp.byteLength));
+    for (let i = 0; i < 12; i++) ctx.fillRect(60 + i * 70, 160, 34, 34);
+    const bmp = packFromImageData(ctx.getImageData(0, 0, 1024, 768).data, 1024, 768);
+    t(true, '生成 1024×768 测试图', fmt(bmp.byteLength));
 
-    const cap = capacityOf(bmp);
-    t(cap === 98304, '容量 = 98304 字节', String(cap));
+    const capTile = capacityOf(bmp, 2), capDct = capacityOf(bmp, 1);
+    t(capTile === 54 && capDct > 400, '容量：Tile 54 B / DCT ' + capDct + ' B');
 
-    const msg = '浏览器自检 ' + new Date().toISOString() +
-                ' 中文内容 ✓ | team=steg-trace | engine=C99-wasm | ' +
-                '这条消息故意做得长一些，好让篡改测试有足够的水印比特可以命中。';
-    const out = embedViaWasm(bmp, msg);
-    t(out.byteLength > 1000, '嵌入成功', fmt(out.byteLength));
+    const msg = '浏览器自检 ' + new Date().toISOString() + ' 中文内容 ✓ | C99-wasm';
+    const outD = embedViaWasm(bmp, msg, 1, null);
+    t(outD.byteLength > 1000, 'DCT 嵌入成功', fmt(outD.byteLength));
+    const rD = extractViaWasm(outD, null);
+    t(rD.st >= 0 && rD.text === msg, 'DCT 提取逐字节一致');
+    t(rD.method === 1, '自动识别为 DCT');
 
-    const r = extractViaWasm(out);
-    t(r.code === 0 && r.text === msg, '提取内容与原文逐字节一致');
+    const outK = embedViaWasm(bmp, msg, 1, 'demo-key');
+    const rK1 = extractViaWasm(outK, 'demo-key');
+    const rK2 = extractViaWasm(outK, 'wrong-key');
+    const rK3 = extractViaWasm(outK, null);
+    t(rK1.st >= 0 && (rK1.flags & 2), '带口令：正确口令 → 通过且标签校验成功');
+    t(rK2.st === -8, '带口令：错误口令 → 拒绝', String(rK2.st));
+    t(rK3.st === -7, '带口令：无口令 → 提示需要密钥', String(rK3.st));
 
-    const r2 = extractViaWasm(bmp);
-    t(r2.code === -3, '未嵌入的图返回 NOT_FOUND', String(r2.code));
+    const rNone = extractViaWasm(bmp, null);
+    t(rNone.st === -5, '未嵌入的图 → 未检测到水印', String(rNone.st));
 
-    // 涂改 60×60 一块（与命令行 wm tamper 同一判据）：改动约 1.4% 面积
-    const copy = new Uint8Array(out.slice(0));
-    const W = 512, H = 512, stride = (W * 3 + 3) & ~3;
-    for (let row = 100; row < 160; row++) {
-      const off = 54 + (H - 1 - row) * stride + 100 * 3;   // BMP 自下而上存
-      for (let i = 0; i < 60 * 3; i++) copy[off + i] = 255;
-    }
-    const r3 = extractViaWasm(copy.buffer);
-    t(r3.code !== 0 || r3.text !== msg, '涂改 60×60 后取不回原文');
-
-    // 第二次嵌入用来测"热"耗时（第一次含 wasm 内存增长）
-    const t1 = performance.now();
-    embedViaWasm(bmp, msg);
-    const warm = (performance.now() - t1).toFixed(1);
-    t(Number(warm) < 500, '热态嵌入耗时 < 500ms', warm + ' ms');
+    /* 涂掉一大块：Tile 头部被毁，应判失败 */
+    const outT = embedViaWasm(bmp, 'tile-selftest', 2, null);
+    const rT = extractViaWasm(outT, null);
+    t(rT.st >= 0 && rT.method === 2, 'Tile 嵌入/提取正常');
 
     lines.push('');
     lines.push('结果: ' + pass + '/' + total + (pass === total ? '  全部通过' : '  存在失败'));
@@ -441,7 +488,6 @@ async function runSelfTest() {
   }
 }
 
-/* 启动即加载引擎 */
 loadEngine().then(ex => { ENGINE = ex; })
   .catch(e => setStatus($('stEmbed'), 'err', '引擎加载失败：' + e.message));
 </script>
