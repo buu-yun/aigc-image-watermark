@@ -10,6 +10,8 @@
 
 > 那个页面里跑的不是 JS 复刻，而是把 **全部 C 源码（LSB + DCT + Tile + HMAC）** 用 zig cc 编成的 **51.5 KB WebAssembly** —— 同一份 C 源码，跑在你浏览器里；网页上可选方法、可填口令。
 
+📚 **文档索引**： [给外行看的介绍](INTRO.md) ｜ [使用手册](MANUAL.md) ｜ [技术方案](TECHNICAL.md) ｜ [学习笔记（术语+原理）](NOTES.md)
+
 > 目标：**能藏能取** —— 手写 24 位 BMP 读写 + LSB 隐写，跑通最小闭环。
 > 约束：纯 C99 + 标准库，Windows + gcc，无第三方依赖。
 
