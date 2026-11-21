@@ -362,6 +362,28 @@ int wm2_read_sentinel(const BmpImage *img, uint16_t *crc)
     return 0;
 }
 
+int wm2_sentinel_scan(const BmpImage *img, int *intact, uint16_t *crc_out)
+{
+    if (intact) *intact = 0;
+    if (crc_out) *crc_out = 0;
+    if (!img) return 0;
+
+    int good = 0;
+    uint16_t first = 0;
+    int have = 0;
+
+    for (int t = 0; t < WM2_SENTINEL_COPIES; t++) {
+        uint16_t c = 0;
+        if (read_copy(img, t, &c)) {
+            good++;
+            if (!have) { first = c; have = 1; }
+        }
+    }
+    if (intact) *intact = good;
+    if (crc_out) *crc_out = first;
+    return good > 0;
+}
+
 int wm2_sentinel_check(const BmpImage *img, uint16_t crc, int *intact)
 {
     if (intact) *intact = 0;

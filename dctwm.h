@@ -82,6 +82,9 @@ int wm2_read_sentinel(const BmpImage *img, uint16_t *crc);   /* 1=命中，0=没
  * 统计 16 份哨兵里有多少份完好（魔数 'S' 'N' 还在，且 CRC 与头部一致）。
  * intact 返回完好份数；返回值 1 表示至少有 1 份可用。
  */
+/* 只数"魔数完好"的份数（不比对 CRC），并回传其中一份的 CRC —— verify 用 */
+int wm2_sentinel_scan(const BmpImage *img, int *intact, uint16_t *crc_out);
+
 int wm2_sentinel_check(const BmpImage *img, uint16_t crc, int *intact);
 
 #endif /* DCTWM_H */

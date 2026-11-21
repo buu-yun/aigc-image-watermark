@@ -15,7 +15,7 @@ function Check([bool]$cond, [string]$name) {
 }
 
 Write-Host "=== 0. 编译 ===（含 M2 新增：crc16.c / dct.c / dctwm.c）"
-$out = & gcc -std=c99 -O2 -Wall -Wextra -o wm.exe bmp.c lsb.c crc16.c dct.c dctwm.c main.c -lm 2>&1 | Out-String
+$out = & gcc -std=c99 -O2 -Wall -Wextra -o wm.exe bmp.c lsb.c crc16.c dct.c dctwm.c tilewm.c main.c -lm 2>&1 | Out-String
 Check ($LASTEXITCODE -eq 0 -and $out.Trim() -eq '') "编译通过且零警告"
 
 Write-Host "=== 1. 生成 1024x768 载体与短消息 ==="

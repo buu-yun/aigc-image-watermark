@@ -15,6 +15,7 @@
 #include "crc16.h"
 #include "dctwm.h"
 #include "lsb.h"
+#include "tilewm.h"
 
 /* ==================== 通用工具 ==================== */
 
@@ -24,11 +25,12 @@ static void usage(void)
         "AI 图像可信水印引擎  M1：LSB 隐写最小闭环\n"
         "\n"
         "用法:\n"
-        "  wm embed    -i <载体.bmp> -o <含水印.bmp> -f <消息.txt> [-m dct|lsb] [-q]\n"
+        "  wm embed    -i <载体.bmp> -o <含水印.bmp> -f <消息.txt> [-m dct|tile|lsb] [-q]\n"
         "  wm embed    -i <载体.bmp> -o <含水印.bmp> -t <文本>     [-q]\n"
         "  wm extract  -i <含水印.bmp> [-o <输出.txt>] [-q]\n"
         "  wm info     -i <图片.bmp>\n"
         "  wm verify   -i <待验.bmp> [-o <明文.txt>]     三态：真 / 可疑 / 假\n"
+        "  wm heatmap  -i <待验.bmp> -o <热力图.bmp>       标出被改的格子（Tile 模式）\n"
         "  wm diff     -i <原图.bmp>   -j <含水印.bmp>\n"
         "  wm tamper   -i <图.bmp> -o <改后.bmp> -r <x,y,w,h> [-c B,G,R]\n"
         "  wm selftest\n"
@@ -110,7 +112,8 @@ static int cmd_embed(int argc, char **argv)
             const char *m = argv[++i];
             if (!strcmp(m, "lsb")) method = 0;
             else if (!strcmp(m, "dct")) method = 1;
-            else { fprintf(stderr, "[err] -m 只能是 dct 或 lsb\n"); return 2; }
+            else if (!strcmp(m, "tile")) method = 2;
+            else { fprintf(stderr, "[err] -m 只能是 dct / tile / lsb\n"); return 2; }
         }
         else if (!strcmp(a, "-q"))                 quiet    = 1;
         else { fprintf(stderr, "[err] 未知参数: %s\n", a); return 2; }
@@ -158,6 +161,16 @@ static int cmd_embed(int argc, char **argv)
             free(msg_buf);
             return 1;
         }
+    } else if (method == 2) {
+        Wm3Status st = wm3_embed(img, msg, msg_len, quiet ? 0 : 1);
+        if (st != WM3_OK) {
+            fprintf(stderr, "[err] 嵌入失败: %s\n", wm3_status_str(st));
+            fprintf(stderr, "[err] Tile 模式单条上限 %zu 字节；这张图有 %d 份完整水印（瓦片数）\n",
+                    wm3_max_payload(), wm3_tile_count(img));
+            bmp_free(img);
+            free(msg_buf);
+            return 1;
+        }
     } else {
         Wm2Status st = wm2_embed(img, msg, msg_len, quiet ? 0 : 1);
         if (st != WM2_OK) {
@@ -186,11 +199,71 @@ static int cmd_embed(int argc, char **argv)
 
     if (!quiet)
         printf("[embed] 已生成: %s（%s，BMP 无损保存）\n", out_path,
-               method == 0 ? "LSB 空域，转 JPG 即失效" : "DCT 频域，可抗 JPEG 压缩");
+               method == 0 ? "LSB 空域，转 JPG 即失效"
+                           : (method == 2 ? "Tile 分块冗余，可抗裁剪" : "DCT 频域，可抗 JPEG 压缩"));
 
     bmp_free(img);
     free(msg_buf);
     return 0;
+}
+
+/* ==================== extract / verify 共用 ==================== */
+
+/*
+ * 依次尝试三种水印：Tile（抗裁剪）→ DCT（抗压缩）→ LSB（脆弱）。
+ * 方法字节写在水印头里，不靠猜。
+ * 返回 0=完整命中，1=命中但 CRC 失败，-1=都没找到。
+ */
+static int auto_extract(const BmpImage *img, uint8_t *buf, size_t cap, size_t *len,
+                        int *method, float heat[WM3_CELLS * WM3_CELLS], int verbose)
+{
+    *len = 0;
+    if (method) *method = -1;
+
+    size_t tlen = 0;
+    int dx = 0, dy = 0;
+    Wm3Status s3 = wm3_extract(img, buf, cap, &tlen, &dx, &dy, heat, verbose);
+    if (s3 == WM3_OK || s3 == WM3_ERR_CRC) {
+        *len = tlen;
+        if (method) *method = 2;
+        if (verbose)
+            printf("[extract] 命中方式: Tile 分块冗余（重同步偏移 %d,%d）\n", dx, dy);
+        return (s3 == WM3_OK) ? 0 : 1;
+    }
+
+    uint16_t hc   = 0;
+    size_t   wlen = 0;
+    Wm2Status s2  = wm2_extract(img, buf, cap, &wlen, &hc, 0);
+    if (s2 == WM2_OK || s2 == WM2_ERR_CRC) {
+        *len = wlen;
+        if (method) *method = 1;
+        if (verbose) printf("[extract] 命中方式: DCT 频域（整幅顺序分配）\n");
+        return (s2 == WM2_OK) ? 0 : 1;
+    }
+
+    size_t    llen = 0;
+    size_t    lcap = lsb_capacity_bytes(img);
+    LsbStatus s1   = lsb_extract(img, buf, (lcap + 1u < cap) ? lcap + 1u : cap, &llen, 0);
+    if (s1 == LSB_OK) {
+        *len = llen;
+        if (method) *method = 0;
+        if (verbose) printf("[extract] 命中方式: LSB 空域（脆弱）\n");
+        return 0;
+    }
+    return -1;
+}
+
+/* 申请"够大"的缓冲：三种方法里最大的那个容量 */
+static uint8_t *alloc_extract_buf(const BmpImage *img, size_t *cap)
+{
+    size_t c = wm2_capacity_bytes(img);
+    size_t l = lsb_capacity_bytes(img);
+    if (l > c) c = l;
+    if (wm3_max_payload() > c) c = wm3_max_payload();
+    c += 16u;
+    uint8_t *buf = (uint8_t *)malloc(c);
+    if (buf) *cap = c;
+    return buf;
 }
 
 /* ==================== extract ==================== */
@@ -212,42 +285,23 @@ static int cmd_extract(int argc, char **argv)
     BmpImage *img = bmp_load(in_path);
     if (!img) return 1;
 
-    /* 先试 DCT（抗压缩的那一路），没命中再退回 LSB。方法字节写在水印头里，不靠猜。 */
-    size_t   cap = wm2_capacity_bytes(img) + 64u;
-    if (cap < lsb_capacity_bytes(img) + 2u) cap = lsb_capacity_bytes(img) + 2u;
+    size_t   cap = 0;
+    uint8_t *buf = alloc_extract_buf(img, &cap);
+    if (!buf) { fprintf(stderr, "[err] 内存不足\n"); bmp_free(img); return 1; }
 
-    uint8_t *buf = (uint8_t *)malloc(cap + 2u);
-    if (!buf) {
-        fprintf(stderr, "[err] 内存不足\n");
-        bmp_free(img);
-        return 1;
-    }
-
-    size_t   len = 0;
-    uint16_t hcrc = 0;
-    Wm2Status ds = wm2_extract(img, buf, cap + 1u, &len, &hcrc, quiet ? 0 : 1);
-
-    if (ds == WM2_OK || ds == WM2_ERR_CRC) {
-        if (ds == WM2_ERR_CRC)
-            fprintf(stderr, "[extract] 警告: %s\n", wm2_status_str(ds));
-        if (ds == WM2_OK && !quiet) printf("[extract] 命中方式: DCT（频域，抗压缩）\n");
-    } else {
-        size_t lcap = lsb_capacity_bytes(img);
-        len = 0;
-        LsbStatus lst = lsb_extract(img, buf, cap + 1u < lcap + 1u ? cap + 1u : lcap + 1u,
-                                    &len, quiet ? 0 : 1);
-        if (lst != LSB_OK) {
-            fprintf(stderr, "[extract] 失败: 两种水印都没找到（%s / %s）\n",
-                    wm2_status_str(ds), lsb_status_str(lst));
-            bmp_free(img);
-            free(buf);
-            return 1;
-        }
-        if (!quiet) printf("[extract] 命中方式: LSB（空域，脆弱）\n");
-    }
+    size_t len = 0;
+    int    method = -1;
+    int    rc = auto_extract(img, buf, cap, &len, &method, NULL, quiet ? 0 : 1);
     bmp_free(img);
 
-    /* 原样输出字节（不做编码转换，UTF-8 进来就 UTF-8 出去） */
+    if (rc < 0) {
+        fprintf(stderr, "[extract] 失败: 三种水印都没找到（Tile / DCT / LSB）\n");
+        free(buf);
+        return 1;
+    }
+    if (rc == 1)
+        fprintf(stderr, "[extract] 警告: CRC 校验失败，取回的内容可能已被篡改\n");
+
     fwrite(buf, 1, len, stdout);
     fputc('\n', stdout);
 
@@ -272,18 +326,13 @@ static int cmd_extract(int argc, char **argv)
     free(buf);
     return 0;
 }
-
 /* ==================== verify ==================== */
 
 /*
- * 三态判定 —— 这是 M2 的核心价值，M1 做不到：
- *   DCT 的 CRC 通过 = 内容完整（哪怕被压缩过）
- *   LSB 哨兵吻合   = 像素一个都没动
- * 两者结合就能区分"正常传播"和"真被改过"：
- *   真   ：CRC 通过 + 哨兵吻合
- *   可疑 ：CRC 通过 + 哨兵对不上（被重编码/滤镜/改尺寸，但内容没被编辑）
- *   假   ：CRC 失败（内容被编辑）
- *   无水印：读不出有效头
+ * 三态判定（M2 引入，M3 增加"篡改定位"）：
+ *   DCT/Tile 的 CRC 通过 = 内容完整（哪怕被压缩/裁剪过）
+ *   LSB 哨兵 16 份是否完好 = 像素有没有被重编码
+ * 组合出：【真】/【可疑】/【假】/【无水印】
  */
 static int cmd_verify(int argc, char **argv)
 {
@@ -302,55 +351,160 @@ static int cmd_verify(int argc, char **argv)
     BmpImage *img = bmp_load(in_path);
     if (!img) return 1;
 
-    size_t   cap = wm2_capacity_bytes(img) + 64u;
-    uint8_t *buf = (uint8_t *)malloc(cap + 2u);
+    size_t   cap = 0;
+    uint8_t *buf = alloc_extract_buf(img, &cap);
     if (!buf) { bmp_free(img); return 1; }
 
-    size_t   len  = 0;
-    uint16_t hcrc = 0;
-    Wm2Status ds  = wm2_extract(img, buf, cap + 1u, &len, &hcrc, quiet ? 0 : 1);
+    float heat[WM3_CELLS * WM3_CELLS];
+    for (int i = 0; i < WM3_CELLS * WM3_CELLS; i++) heat[i] = 0.0f;
 
-    int intact = 0;
-    (void)wm2_sentinel_check(img, hcrc, &intact);
-    int dct_crc_ok = (ds == WM2_OK);
+    size_t len = 0;
+    int    method = -1;
+    int    rc = auto_extract(img, buf, cap, &len, &method, heat, quiet ? 0 : 1);
 
+    int      intact = 0;
+    uint16_t scap   = 0;
+    (void)wm2_sentinel_scan(img, &intact, &scap);
+
+    int bw = img->width, bh = img->height;
     bmp_free(img);
 
+    static const char *kMethodName[] = { "LSB（空域）", "DCT（频域）", "Tile（分块冗余）" };
+
     printf("\n文件: %s\n", in_path);
-    printf("DCT 水印 : %s\n", wm2_status_str(ds));
-    printf("LSB 哨兵 : %d/%d 份完好%s\n", intact, WM2_SENTINEL_COPIES,
-           intact == WM2_SENTINEL_COPIES ? "（像素未被改动）"
-                                         : "（有区域被动过：重编码 / 局部编辑）");
-
-    int code;
-    if (dct_crc_ok && intact == WM2_SENTINEL_COPIES) {
-        printf("结论     : 【真】内容完整，且像素未被改动\n");
-        code = 0;
-    } else if (dct_crc_ok) {
-        printf("结论     : 【可疑】内容可读且 CRC 通过，但像素被改动过\n");
-        printf("           原因可能是重编码/压缩/加滤镜/改尺寸，或局部编辑；\n");
-        printf("           内容本身仍然可信（CRC 通过），但不是原始文件。\n");
-        code = 2;
-    } else if (ds == WM2_ERR_CRC) {
-        printf("结论     : 【假】CRC 校验失败，内容与嵌入时不一致（已被篡改/覆盖）\n");
-        code = 3;
-    } else {
-        printf("结论     : 【无水印】未找到可解析的 DCT 水印\n");
-        code = 4;
+    if (rc < 0) {
+        printf("水印     : 未找到（Tile / DCT / LSB 都没有）\n");
+        printf("结论     : 【无水印】未找到可解析的水印\n");
+        free(buf);
+        return 4;
     }
+    printf("水印     : 命中，方式 %s，内容 %lu 字节\n",
+           (method >= 0 && method <= 2) ? kMethodName[method] : "未知",
+           (unsigned long)len);
+    printf("CRC      : %s\n", rc == 0 ? "通过（内容完整）" : "失败（内容被改过）");
+    printf("LSB 哨兵 : %d/%d 份完好%s\n", intact, WM2_SENTINEL_COPIES,
+           intact == WM2_SENTINEL_COPIES ? "（像素未被改动）" : "（有区域被动过）");
 
-    if (ds == WM2_OK || ds == WM2_ERR_CRC) {
-        printf("取回内容 : %lu 字节\n", (unsigned long)len);
-        fwrite(buf, 1, len, stdout);
-        fputc('\n', stdout);
-        if (out_path) {
-            FILE *fp = fopen(out_path, "wb");
-            if (fp) { fwrite(buf, 1, len, fp); fclose(fp); }
+    /* M3：篡改定位（只有 Tile 模式能给出格子级结果） */
+    if (method == 2 && (rc == 0 || rc == 1)) {
+        int  worst = 0;
+        for (int i = 1; i < WM3_CELLS * WM3_CELLS; i++)
+            if (heat[i] > heat[worst]) worst = i;
+        printf("篡改定位 : 最高反水格 第 %d 行第 %d 列，%d%%\n",
+               worst / WM3_CELLS + 1, worst % WM3_CELLS + 1,
+               (int)(heat[worst] * 100.0f));
+        if (heat[worst] > 0.15f) {
+            printf("           该格有超过 15%% 的块与多数派相反 → 很可能被局部编辑过\n");
+        } else {
+            printf("           各格反水率都低，看不出局部编辑\n");
         }
     }
 
+    int code;
+    if (rc == 0 && intact == WM2_SENTINEL_COPIES) {
+        printf("结论     : 【真】内容完整，且像素未被改动\n");
+        code = 0;
+    } else if (rc == 0) {
+        printf("结论     : 【可疑】内容可读且 CRC 通过，但像素被改动过\n");
+        printf("           可能是重编码/压缩/裁剪/加滤镜，或局部编辑；内容本身仍可信\n");
+        code = 2;
+    } else {
+        printf("结论     : 【假】CRC 校验失败，内容与嵌入时不一致（已被篡改）\n");
+        code = 3;
+    }
+
+    printf("取回内容 : %lu 字节\n", (unsigned long)len);
+    fwrite(buf, 1, len, stdout);
+    fputc('\n', stdout);
+
+    if (out_path) {
+        FILE *fp = fopen(out_path, "wb");
+        if (fp) { fwrite(buf, 1, len, fp); fclose(fp); }
+    }
+
     free(buf);
+    (void)bw; (void)bh;
     return code;
+}
+
+/* ==================== heatmap ==================== */
+
+/* 把 4×4 网格里反水率 > 30% 的格子用红框标出来，输出一张新图给人看 */
+static int cmd_heatmap(int argc, char **argv)
+{
+    const char *in_path = NULL, *out_path = NULL;
+    int quiet = 0;
+
+    for (int i = 2; i < argc; i++) {
+        const char *a = argv[i];
+        if (!strcmp(a, "-i") && i + 1 < argc)      in_path  = argv[++i];
+        else if (!strcmp(a, "-o") && i + 1 < argc) out_path = argv[++i];
+        else if (!strcmp(a, "-q"))                 quiet    = 1;
+        else { fprintf(stderr, "[err] 未知参数: %s\n", a); return 2; }
+    }
+    if (!in_path || !out_path) { fprintf(stderr, "[err] heatmap 需要 -i 与 -o\n"); return 2; }
+
+    BmpImage *img = bmp_load(in_path);
+    if (!img) return 1;
+
+    size_t   cap = 0;
+    uint8_t *buf = alloc_extract_buf(img, &cap);
+    if (!buf) { bmp_free(img); return 1; }
+
+    float heat[WM3_CELLS * WM3_CELLS];
+    size_t len = 0;
+    int method = -1;
+    int rc = auto_extract(img, buf, cap, &len, &method, heat, 0);
+    free(buf);
+
+    if (rc < 0 || method != 2) {
+        fprintf(stderr, "[heatmap] 这张图不是 Tile 模式水印，无法定位"
+                        "（先 wm.exe embed -m tile）\n");
+        bmp_free(img);
+        return 1;
+    }
+
+    int bw = img->width / 8, bh = img->height / 8;
+    int gx = bw / WM3_CELLS > 0 ? bw / WM3_CELLS : 1;
+    int gy = bh / WM3_CELLS > 0 ? bh / WM3_CELLS : 1;
+    int marked = 0;
+
+    for (int cy = 0; cy < WM3_CELLS; cy++) {
+        for (int cx = 0; cx < WM3_CELLS; cx++) {
+            float h = heat[cy * WM3_CELLS + cx];
+            if (h <= 0.15f) continue;
+            marked++;
+
+            int x0 = cx * gx * 8, y0 = cy * gy * 8;
+            int x1 = x0 + gx * 8, y1 = y0 + gy * 8;
+            if (x1 > img->width)  x1 = img->width;
+            if (y1 > img->height) y1 = img->height;
+
+            /* 画 3 像素宽的红框 */
+            for (int t = 0; t < 3; t++) {
+                for (int x = x0; x < x1; x++) {
+                    uint8_t *p1 = bmp_pixel(img, x, y0 + t);
+                    uint8_t *p2 = bmp_pixel(img, x, y1 - 1 - t);
+                    if (p1) { p1[0] = 0; p1[1] = 0; p1[2] = 255; }
+                    if (p2) { p2[0] = 0; p2[1] = 0; p2[2] = 255; }
+                }
+                for (int y = y0; y < y1; y++) {
+                    uint8_t *p1 = bmp_pixel(img, x0 + t, y);
+                    uint8_t *p2 = bmp_pixel(img, x1 - 1 - t, y);
+                    if (p1) { p1[0] = 0; p1[1] = 0; p1[2] = 255; }
+                    if (p2) { p2[0] = 0; p2[1] = 0; p2[2] = 255; }
+                }
+            }
+            if (!quiet)
+                printf("[heatmap] 标记 第 %d 行第 %d 列（反水率 %d%%）\n",
+                       cy + 1, cx + 1, (int)(h * 100.0f));
+        }
+    }
+
+    if (bmp_save(img, out_path) != 0) { bmp_free(img); return 1; }
+    printf("[heatmap] 已输出: %s（标记 %d 个格子）\n", out_path, marked);
+    bmp_free(img);
+    return 0;
 }
 /* ==================== info ==================== */
 
@@ -424,7 +578,7 @@ static int cmd_diff(int argc, char **argv)
     if (psnr > 99.0) psnr = 99.0;
 
     printf("最大通道差 : %d  (0=完全相同, 1=只有最低位变了)\n", maxd);
-    printf("PSNR      : %.2f dB  （>40 dB 即肉眼不可见；越高越接近原图）\n", psnr);
+    printf("PSNR      : %.2f dB  （>40 dB 很安全，>38 dB 通常肉眼不可见；越高越接近原图）\n", psnr);
     printf("改动通道数 : %zu / %zu (%.4f%%)\n", changed, total,
            total ? (double)changed * 100.0 / (double)total : 0.0);
     printf("结论       : %s\n",
@@ -807,56 +961,107 @@ static int cmd_selftest(void)
 
 /* ==================== bench ==================== */
 
-/* 进程内计时，排除进程启动开销；M3 的性能表会在此基础上扩展 */
+/* 三种方法在三种分辨率下的耗时与画质（进程内计时，排除进程启动开销） */
 static int cmd_bench(void)
 {
-    const int W = 512, H = 512, N = 200;
-    BmpImage *img = bmp_create(W, H);
-    if (!img) return 1;
-    fill_test_image(img);
+    static const struct { int w, h; } sizes[] = { { 512, 512 }, { 1024, 768 }, { 1920, 1080 } };
+    const int NL = 20, ND = 10, NT = 5;      /* 各方法重复次数 */
 
-    uint8_t msg[324];
-    fill_payload(msg, sizeof(msg), 5);
+    uint8_t msg_lsb[200];
+    uint8_t msg_dct[100];   /* 100 字节，512x512 也放得下（DCT 容量 154） */
+    uint8_t msg_tile[40];
+    fill_payload(msg_lsb,  sizeof(msg_lsb),  11);
+    fill_payload(msg_dct,  sizeof(msg_dct),  12);
+    fill_payload(msg_tile, sizeof(msg_tile), 13);
 
-    printf("=== 性能基准：%dx%d，消息 %zu 字节，各 %d 次 ===\n",
-           W, H, sizeof(msg), N);
+    printf("=== 性能基准（进程内计时，-O2，本机 CPU）===\n");
+    printf("%-11s | %-14s | %-14s | %-14s\n", "分辨率", "LSB", "DCT", "Tile");
+    printf("------------|----------------|----------------|----------------\n");
 
-    clock_t t0 = clock();
-    for (int i = 0; i < N; i++) {
-        if (lsb_embed(img, msg, sizeof(msg), 0) != LSB_OK) {
-            fprintf(stderr, "[bench] 嵌入失败\n");
-            bmp_free(img);
-            return 1;
+    for (size_t s = 0; s < sizeof(sizes) / sizeof(sizes[0]); s++) {
+        int W = sizes[s].w, H = sizes[s].h;
+        BmpImage *img  = bmp_create(W, H);
+        BmpImage *orig = bmp_create(W, H);
+        if (!img || !orig) { bmp_free(img); bmp_free(orig); return 1; }
+        fill_test_image(img);
+        memcpy(orig->pixels, img->pixels, orig->stride * (size_t)H);
+
+        char cells[3][64];
+
+        /* LSB */
+        clock_t t0 = clock();
+        for (int i = 0; i < NL; i++) {
+            memcpy(img->pixels, orig->pixels, orig->stride * (size_t)H);
+            lsb_embed(img, msg_lsb, sizeof(msg_lsb), 0);
         }
-    }
-    clock_t t1 = clock();
-
-    uint8_t out[512];
-    size_t  got = 0;
-    for (int i = 0; i < N; i++) {
-        if (lsb_extract(img, out, sizeof(out), &got, 0) != LSB_OK) {
-            fprintf(stderr, "[bench] 提取失败\n");
-            bmp_free(img);
-            return 1;
+        double ms_lsb = (double)(clock() - t0) * 1000.0 / CLOCKS_PER_SEC / NL;
+        double lg = 0, cnt = 0;
+        {
+            int maxd = 0; size_t changed = 0; double sse = 0;
+            analyze_diff(orig, img, &maxd, &changed, &sse);
+            double mse = sse / ((double)W * H * 3.0);
+            lg = (mse > 0) ? 10.0 * log10(255.0 * 255.0 / mse) : 99.0;
+            cnt = changed;
         }
+        snprintf(cells[0], sizeof(cells[0]), "%.2f ms  PSNR %.1f", ms_lsb, lg);
+        (void)cnt;
+
+        /* DCT */
+        memcpy(img->pixels, orig->pixels, orig->stride * (size_t)H);
+        t0 = clock();
+        for (int i = 0; i < ND; i++) {
+            BmpImage *tmp = bmp_create(W, H);
+            memcpy(tmp->pixels, orig->pixels, orig->stride * (size_t)H);
+            wm2_embed(tmp, msg_dct, sizeof(msg_dct), 0);
+            if (i == ND - 1) {
+                memcpy(img->pixels, tmp->pixels, tmp->stride * (size_t)H);
+            }
+            bmp_free(tmp);
+        }
+        double ms_dct = (double)(clock() - t0) * 1000.0 / CLOCKS_PER_SEC / ND;
+        {
+            int maxd = 0; size_t changed = 0; double sse = 0;
+            analyze_diff(orig, img, &maxd, &changed, &sse);
+            double mse = sse / ((double)W * H * 3.0);
+            lg = (mse > 0) ? 10.0 * log10(255.0 * 255.0 / mse) : 99.0;
+        }
+        snprintf(cells[1], sizeof(cells[1]), "%.2f ms  PSNR %.1f", ms_dct, lg);
+
+        /* Tile */
+        memcpy(img->pixels, orig->pixels, orig->stride * (size_t)H);
+        t0 = clock();
+        int tile_ok = 1;
+        for (int i = 0; i < NT; i++) {
+            BmpImage *tmp = bmp_create(W, H);
+            memcpy(tmp->pixels, orig->pixels, orig->stride * (size_t)H);
+            if (wm3_embed(tmp, msg_tile, sizeof(msg_tile), 0) != WM3_OK) tile_ok = 0;
+            if (i == NT - 1) memcpy(img->pixels, tmp->pixels, tmp->stride * (size_t)H);
+            bmp_free(tmp);
+        }
+        double ms_tile = (double)(clock() - t0) * 1000.0 / CLOCKS_PER_SEC / NT;
+        {
+            int maxd = 0; size_t changed = 0; double sse = 0;
+            analyze_diff(orig, img, &maxd, &changed, &sse);
+            double mse = sse / ((double)W * H * 3.0);
+            lg = (mse > 0) ? 10.0 * log10(255.0 * 255.0 / mse) : 99.0;
+        }
+        if (tile_ok)
+            snprintf(cells[2], sizeof(cells[2]), "%.2f ms  PSNR %.1f", ms_tile, lg);
+        else
+            snprintf(cells[2], sizeof(cells[2]), "图太小");
+
+        printf("%-11s | %-14s | %-14s | %-14s\n",
+               (s == 0) ? "512x512" : (s == 1) ? "1024x768" : "1920x1080",
+               cells[0], cells[1], cells[2]);
+
+        bmp_free(img);
+        bmp_free(orig);
     }
-    clock_t t2 = clock();
 
-    double ms_embed   = (double)(t1 - t0) * 1000.0 / CLOCKS_PER_SEC / N;
-    double ms_extract = (double)(t2 - t1) * 1000.0 / CLOCKS_PER_SEC / N;
-
-    printf("embed   : %.4f ms/次  → 约 %ld 次/秒\n", ms_embed,
-           (long)(ms_embed > 0 ? 1000.0 / ms_embed : 0));
-    printf("extract : %.4f ms/次  → 约 %ld 次/秒\n", ms_extract,
-           (long)(ms_extract > 0 ? 1000.0 / ms_extract : 0));
-    printf("说明    : LSB 只访问水印用到的 %zu 个通道（不扫描全图），\n",
-           (sizeof(msg) + LSB_HEADER_SIZE) * 8u);
-    printf("          所以耗时与消息长度成正比，与图片大小几乎无关（同一张图=同一组通道）。\n");
-
-    bmp_free(img);
+    printf("\n说明：LSB 20 次 / DCT 10 次 / Tile 5 次取平均；PSNR 越高越接近原图（>38 dB 肉眼不可见）。\n");
+    printf("Tile 模式单条消息上限 %zu 字节，但抗裁剪（裁掉 75%% 仍可恢复）。\n", wm3_max_payload());
     return 0;
 }
-
 /* ==================== 入口 ==================== */
 
 int main(int argc, char **argv)
@@ -867,6 +1072,7 @@ int main(int argc, char **argv)
     if (!strcmp(cmd, "embed"))    return cmd_embed(argc, argv);
     if (!strcmp(cmd, "extract"))  return cmd_extract(argc, argv);
     if (!strcmp(cmd, "verify"))   return cmd_verify(argc, argv);
+    if (!strcmp(cmd, "heatmap"))  return cmd_heatmap(argc, argv);
     if (!strcmp(cmd, "info"))     return cmd_info(argc, argv);
     if (!strcmp(cmd, "diff"))     return cmd_diff(argc, argv);
     if (!strcmp(cmd, "tamper"))   return cmd_tamper(argc, argv);
